@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   compatibility:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -29,6 +29,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Install and verify the isolated validation sandbox
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes bubblewrap
+          bwrap --unshare-all --ro-bind / / -- /bin/true
       - name: Install the tested Codex client
         run: npm install --global @openai/codex@0.160.0
       - name: Download the reviewed proxy artifact
