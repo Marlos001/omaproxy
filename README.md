@@ -72,7 +72,7 @@ Choose a model from **Settings → Show models**. Provider OAuth tokens stay wit
 | xAI | ✓ | Not yet supported |
 | OpenAI-compatible API endpoints | API-key form | Not yet supported |
 
-¹ The installer pins **CLIProxyAPI v7.2.154**. Gemini, Qwen, and GitHub Copilot require a compatible backend; unsupported login options are hidden. Provider capabilities and quota endpoints can change.
+¹ The installer pins a reviewed CLIProxyAPI release; see the [installer trust policy](docs/installer-security.md). Gemini, Qwen, and GitHub Copilot require a compatible backend; unsupported login options are hidden. Provider capabilities and quota endpoints can change.
 
 Codex's `prolite` plan is displayed as **PRO · 5×** and `pro` as **PRO · 20×**. These labels describe plan tiers, not remaining tokens or temporary promotions. Monthly-only plans show their overall monthly allowance instead of an invented weekly window.
 
@@ -85,7 +85,7 @@ python3 ~/.config/omarchy/plugins/soojy.omaproxy/scripts/omaproxy.py setup \
   --binary /absolute/path/to/cli-proxy-api-plus
 ```
 
-OmaProxy creates its own configuration and credentials; it does not adopt another proxy's process or tokens. Use `--port 18317` on initial setup if 8317 is occupied. Re-running setup preserves existing settings; restart the proxy after replacing an active backend.
+OmaProxy creates its own configuration and credentials; it does not adopt another proxy's process or tokens. Use `--port 18317` on initial setup if 8317 is occupied. Existing managed installations use the explicit backend update action. A user-selected `setup --binary` preserves configuration; restart the proxy after replacing an active custom backend.
 
 ## Privacy and local storage
 
@@ -108,7 +108,9 @@ rm -f ~/.config/systemd/user/omaproxy.service
 systemctl --user daemon-reload
 ```
 
-The backend version and archive digests are pinned in the plugin and are not silently updated by plugin updates. See the [installer trust policy](docs/installer-security.md) for the reviewed digests and download/extraction limits. Stored credentials remain in `~/.config/omaproxy/` after removal. XDG overrides are supported; adjust the paths if you use them.
+Plugin updates leave the installed backend running. In **Settings → Backend updates**, check the actual installed version and latest upstream version, then explicitly install the reviewed update or restore the previous backend. Safe updates require `bwrap` and validate your configuration in an isolated namespace before replacing anything. A running proxy briefly restarts; a stopped proxy stays stopped.
+
+See the [backend update and recovery guide](docs/backend-updates.md) and [installer trust policy](docs/installer-security.md). Stored credentials remain in `~/.config/omaproxy/` after removal. XDG overrides are supported; adjust the paths if you use them.
 
 ### Upgrading from 0.1.3 or earlier
 
@@ -142,6 +144,8 @@ OMAPROXY_TEST_BINARY="$HOME/.local/share/omaproxy/cli-proxy-api" \
 Integration tests use a separate proxy on an ephemeral loopback port and a mock upstream. They do not use your accounts or send prompts to an AI provider. For structural QML edits, `omarchy restart shell` clears cached components; the proxy service survives the restart.
 
 [Contributing](CONTRIBUTING.md) · [Architecture](docs/architecture.md) · [Report a bug](https://github.com/soojy/omaproxy/issues/new?template=bug_report.md)
+
+Use the [isolated native preview](docs/native-preview.md) to exercise updater controls with fake accounts in the installed Omarchy QML components. It leaves your configured plugin and backend untouched.
 
 ## Credits
 

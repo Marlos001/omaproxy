@@ -18,6 +18,7 @@ Panel {
     property var quotaData: ({accounts: []})
     property var auth: ({})
     property var preferences: ({})
+    property var updates: ({})
     readonly property bool showExtraLimits: setting("showExtraLimits", false) === true
     property var revealedEmails: ({})
     property string notice: ""
@@ -75,6 +76,7 @@ Panel {
             }
         }
         if (result.preferences) preferences = result.preferences
+        if (result.updates) updates = result.updates
         if (result.logs !== undefined) logText = result.logs
         if (result.message) notice = result.message
     }
@@ -214,6 +216,7 @@ Panel {
         bar: root.bar
         text: "󰚩"
         active: root.snapshot.running
+        activeColor: Color.accent
         tooltipText: "OmaProxy · " + (root.snapshot.running ? "Account limits" : "Proxy stopped")
         onPressed: root.toggle()
         Rectangle {
@@ -609,6 +612,25 @@ Panel {
                             }
                             Hint { visible: !(root.snapshot.models || []).length; text: "No models reported by the enabled accounts." }
                         }
+                        PanelSeparator { foreground: root.foreground }
+                        Label { text: "Backend updates"; font.bold: true }
+                        Hint { text: "Installed: " + (root.updates.installed_version || root.snapshot.version || "unknown") + " · Reviewed: " + (root.updates.reviewed_version || "check for updates") }
+                        Hint { visible: !!root.updates.latest_version; text: "Latest upstream: " + (root.updates.latest_version || "") }
+                        Hint { text: "Updating briefly restarts a running proxy. Your configuration and previous backend are kept for rollback." }
+                        ActionButton { text: "Check backend updates"; enabled: !root.busy; onClicked: root.perform(["check-updates"]) }
+                        ActionButton {
+                            visible: root.updates.update_supported === true && root.updates.update_available === true
+                            text: "Install reviewed update"
+                            enabled: !root.busy
+                            onClicked: root.perform(["backend-update"])
+                        }
+                        ActionButton {
+                            visible: root.updates.rollback_available === true
+                            text: "Restore previous backend"
+                            enabled: !root.busy
+                            onClicked: root.perform(["backend-rollback"])
+                        }
+                        Hint { visible: !!root.updates.error; text: root.updates.error || "" }
                         Label { text: "CLIProxyAPI " + (root.snapshot.version || "custom"); opacity: 0.35; font.pixelSize: Style.font.caption }
                     }
                 }

@@ -26,19 +26,20 @@ CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "oma
 DATA = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "omaproxy"
 UNIT = "omaproxy.service"
 REPO = "router-for-me/CLIProxyAPI"
-VERSION = "v7.2.154"
+VERSION = "v8.0.13"
 # Trust anchors reviewed with this plugin snapshot; never derive these at install
 # time from release metadata. A backend update must review and change these pins.
 ARCHIVE_SHA256 = {
-    "amd64": "2a2256ceff048d5fa813aa54e8daa43e870b40e698d5cd21efad46e25aa5a1f9",
-    "aarch64": "3a0cd18d64e3b9990ca72136dbb1da97eedddade00ee6768e8b49fab1de6925e",
+    "amd64": "50ecffb47fdd81c8c5a9825a73a7a905ab66342337e274f39c4276b92d3533f3",
+    "aarch64": "f7ff98a128075ea8437dadd58a88f429a401e452a42ef7119304139185f5344f",
 }
 CHECKSUM_MAX_BYTES = 64 * 1024
 ARCHIVE_MAX_BYTES = 32 * 1024 * 1024
-BINARY_MAX_BYTES = 64 * 1024 * 1024
+BINARY_MAX_BYTES = 80 * 1024 * 1024
 METADATA_MAX_BYTES = 128 * 1024
-EXPANDED_ARCHIVE_MAX_BYTES = 66 * 1024 * 1024
+EXPANDED_ARCHIVE_MAX_BYTES = 82 * 1024 * 1024
 DOWNLOAD_CHUNK_BYTES = 64 * 1024
+REQUEST_MAX_BYTES = 2 * 1024 * 1024
 RELEASE_MEMBERS = {"cli-proxy-api", "LICENSE", "README.md", "README_CN.md", "config.example.yaml"}
 PROVIDERS = [
     ("claude", "Claude", "claude-login"),
@@ -82,7 +83,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def request(url, key=None, method="GET", body=None, timeout=4):
+def request(url, key=None, method="GET", body=None, timeout=4, response_headers=None):
     headers = {"Accept": "application/json", "User-Agent": "OmaProxy/0.1"}
     if key:
         headers["Authorization"] = "Bearer " + key
@@ -93,7 +94,12 @@ def request(url, key=None, method="GET", body=None, timeout=4):
     # Local control traffic must never leave via HTTP_PROXY/HTTPS_PROXY.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
     with opener.open(req, timeout=timeout) as response:
-        return json.load(response)
+        if response_headers is not None:
+            response_headers.update(response.headers)
+        raw = response.read(REQUEST_MAX_BYTES + 1)
+        if len(raw) > REQUEST_MAX_BYTES:
+            raise ValueError("Proxy response exceeds the JSON size limit.")
+        return json.loads(raw)
 
 
 def api(route, method="GET", body=None, timeout=4):
@@ -143,6 +149,12 @@ def status():
                 account["plan"] = plan if isinstance(plan, str) else ""
             result["models"] = sorted({str(row["id"]) for row in models.result().get("data", [])})
         result["running"] = True
+        # Settings record installation intent; this header identifies the process.
+        import backend_updates
+        observed = backend_updates.running_version(request, cfg)
+        if observed:
+            result["version"] = observed
+            result["version_source"] = "running"
     except (OSError, ValueError, urllib.error.URLError):
         result["error"] = "Service is active but its API is unavailable. Check Logs and configuration."
         result["quotas"] = read_json(CONFIG / "quotas.json", {"accounts": []})
@@ -244,7 +256,7 @@ def _extract_reviewed_tar(expanded, binary_path):
     binary_path.chmod(0o700)
 
 
-def install_binary():
+def install_binary(destination=None):
     arch = {"x86_64": "amd64", "aarch64": "aarch64"}.get(platform.machine())
     if platform.system() != "Linux" or arch not in ARCHIVE_SHA256:
         raise ValueError("Automatic installation supports Linux x86_64 and aarch64.")
@@ -267,8 +279,12 @@ def install_binary():
         path.write_bytes(archive)
         binary = Path(temporary) / "cli-proxy-api"
         extract_binary(path, binary)
-        os.replace(binary, DATA / "cli-proxy-api")
-    return str(DATA / "cli-proxy-api")
+        import backend_updates
+        if backend_updates.probe(binary)["version"] != VERSION:
+            raise ValueError("Downloaded backend version does not match the reviewed release.")
+        target = Path(destination) if destination is not None else DATA / "cli-proxy-api"
+        os.replace(binary, target)
+    return str(target)
 
 
 def unit_quote(value):
@@ -327,6 +343,8 @@ def setup(binary=None, port=8317):
         raise ValueError("Port must be between 1024 and 65535.")
     working_directory = unit_working_directory(CONFIG)
     cfg = settings()
+    if cfg and not binary:
+        raise ValueError("Proxy is already configured. Use backend-update to update it safely.")
     if binary:
         binary = str(Path(binary).expanduser().resolve(strict=True))
         version = "custom"
@@ -552,7 +570,8 @@ def main():
     p.add_argument("--binary", help="Use a local CLIProxyAPI or Plus executable")
     p.add_argument("--port", type=int, default=8317)
     for name in ("status", "start", "stop", "restart", "dashboard", "logs", "config", "logs-view",
-                 "auth-status", "auth-cancel", "auth-open", "auth-callback", "custom-add", "preferences", "repair"):
+                 "auth-status", "auth-cancel", "auth-open", "auth-callback", "custom-add", "preferences", "repair",
+                 "check-updates", "backend-update", "backend-rollback"):
         sub.add_parser(name)
     p = sub.add_parser("quotas")
     p.add_argument("--force", action="store_true")
@@ -576,6 +595,11 @@ def main():
             result = setup(args.binary, args.port)
         elif args.action == "status":
             result = status()
+        elif args.action in ("check-updates", "backend-update", "backend-rollback"):
+            import backend_updates
+            bridge = sys.modules[__name__]
+            result = (backend_updates.check_updates(bridge) if args.action == "check-updates"
+                      else backend_updates.change_backend(bridge, rollback=args.action == "backend-rollback"))
         elif not settings():
             raise ValueError("Set up the proxy first.")
         elif args.action == "repair":

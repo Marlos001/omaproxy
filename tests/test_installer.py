@@ -79,7 +79,7 @@ class InstallerTests(unittest.TestCase):
     def test_replaced_checksum_and_archive_cannot_replace_installed_binary(self):
         bad_archive = b'replaced release'
         digest = hashlib.sha256(bad_archive).hexdigest()
-        checksums = f'{digest}  CLIProxyAPI_7.2.154_linux_amd64.tar.gz\n'.encode()
+        checksums = f'{digest}  CLIProxyAPI_{bridge.VERSION.lstrip("v")}_linux_amd64.tar.gz\n'.encode()
         target = self.root / 'cli-proxy-api'
         target.write_bytes(b'existing installation')
         with patch.object(bridge, 'DATA', self.root), patch.object(bridge.platform, 'machine', return_value='x86_64'), \
