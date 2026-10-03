@@ -46,6 +46,7 @@ jobs:
           tar -xzf "$task_archive" -C "$RUNNER_TEMP" cli-proxy-api
           chmod 700 "$RUNNER_TEMP/cli-proxy-api"
           printf 'OMAPROXY_TEST_BINARY=%s\n' "$RUNNER_TEMP/cli-proxy-api" >> "$GITHUB_ENV"
+          printf 'OMAPROXY_TEST_BACKEND=%s\n' "$RUNNER_TEMP/cli-proxy-api" >> "$GITHUB_ENV"
           printf 'OMAPROXY_TEST_CODEX_BINARY=%s\n' "$(command -v codex)" >> "$GITHUB_ENV"
       - name: Unit, backend and real-client contracts
         run: python -m unittest discover -s tests -v
