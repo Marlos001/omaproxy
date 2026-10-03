@@ -80,9 +80,14 @@ ShellRoot {
                 routing: "routingSettings" in widget ? widget.routingSettings : {},
                 diagnostics: "diagnostics" in widget ? widget.diagnostics : {},
                 customProviders: "customProviders" in widget ? widget.customProviders : [],
+                providerWeightsSupported: "providerWeightsSupported" in widget ? widget.providerWeightsSupported : false,
+                clientKeys: "clientKeys" in widget ? widget.clientKeys : [],
+                revokingClient: "revokingClient" in widget ? widget.revokingClient : "",
                 quotaAlerts: "quotaAlerts" in widget ? widget.quotaAlerts : false,
                 mode: widget.snapshot.mode, hasApiKey: widget.snapshot.has_api_key,
                 editingProvider: "editingProvider" in widget ? widget.editingProvider : "",
+                addingKey: widget.addingKey,
+                pageRefreshPending: "pageRefreshPending" in widget ? widget.pageRefreshPending : false,
                 removingProvider: "removingProvider" in widget ? widget.removingProvider : "",
                 passwordFieldsCleared: preview.descendants().filter(function(item) {
                     return item.password === true && item.text !== undefined
@@ -92,6 +97,12 @@ ShellRoot {
             return JSON.stringify(preview.descendants().filter(function(item) {
                 return item.text !== undefined && typeof item.clicked === "function"
             }).map(function(item) { return {text: item.text, visible: item.visible, enabled: item.enabled} }))
+        }
+        function hasText(text: string): bool {
+            return preview.descendants().some(function(item) { return item.text === text && item.visible })
+        }
+        function containsText(text: string): bool {
+            return preview.descendants().some(function(item) { return typeof item.text === "string" && item.text.indexOf(text) >= 0 && item.visible })
         }
         function activate(text: string): string {
             var matches = preview.descendants().filter(function(item) {
@@ -157,6 +168,8 @@ def main():
     parser.add_argument("--smoke", action="store_true", help="Exercise detected native controls against fixtures and capture the concealed account card.")
     parser.add_argument("--repo", type=Path, default=REPO, help="Checkout to preview; its real helper is never copied or executed.")
     args = parser.parse_args()
+    if args.smoke:
+        args.page = "settings"
     runtime = shutil.which("quickshell")
     packaged = Path("/usr/share/omarchy/shell")
     if not runtime or not (packaged / "Ui" / "KeyboardPanel.qml").exists():
@@ -175,7 +188,7 @@ def main():
         state = root / "fixture-state"
         state.mkdir(mode=0o700)
         env = os.environ.copy()
-        env.update(OMAPROXY_PREVIEW_STATE=str(state), QT_LINUX_ACCESSIBILITY_ALWAYS_ON="1", QT_ACCESSIBILITY="1")
+        env.update(OMAPROXY_PREVIEW_STATE=str(state), QT_LINUX_ACCESSIBILITY_ALWAYS_ON="1", QT_ACCESSIBILITY="1", OMAPROXY_PREVIEW_STATUS_DELAY="2" if args.smoke else "0")
         print(json.dumps({"preview_root": str(root), "log": str(root / "quickshell.log"), "action_trace": str(state / "actions.jsonl"), "ipc": [runtime, "ipc", "-p", str(root), "call", "soojy.omaproxy", "showPage", args.page]}), flush=True)
         with (root / "quickshell.log").open("w") as log:
             child = subprocess.Popen([runtime, "-p", str(root), "--no-color"], env=env, stdout=log, stderr=subprocess.STDOUT)
@@ -226,10 +239,11 @@ def smoke(runtime, root):
         raise RuntimeError("Native preview state did not converge: " + json.dumps(result))
 
     def activate(text):
+        wait(lambda state: not state["busy"] and not state["pageRefreshPending"])
         response = ipc("omaproxy-preview", "activate", text)
         if not response.startswith("Activated "):
             raise RuntimeError(response)
-        wait(lambda state: not state["busy"])
+        wait(lambda state: not state["busy"] and not state["pageRefreshPending"])
 
     def controls():
         return json.loads(ipc("omaproxy-preview", "controls"))
@@ -262,7 +276,13 @@ def smoke(runtime, root):
         raise RuntimeError("Native card capture was not saved.")
 
     required = set()
+    initial_state = json.loads(ipc("omaproxy-preview", "state"))
+    cold_settings = "pageRefreshPending" in (root / "BarWidget.qml").read_text()
+    if cold_settings and (initial_state["running"] or initial_state["page"] != 2):
+        raise RuntimeError("Cold Settings preview was not observed before initial status")
     wait(lambda state: state["running"])
+    if cold_settings:
+        wait(lambda state: state["page"] == 2 and bool(state["routing"].get("values")) and '"command": "preferences"' in (root / "fixture-state/actions.jsonl").read_text())
     activate("Settings")
     if has("Check backend updates"):
         activate("Check backend updates")
@@ -310,14 +330,55 @@ def smoke(runtime, root):
         activate("Hide routing details")
         activate("Quota alerts: Off")
         wait(lambda state: state["quotaAlerts"])
+        activate("Limits")
+        activate("Refresh")
+        wait(lambda state: state["noticeError"] and "Preview alert delivery failed" in state["notice"])
+        capture("alert-error")
+        activate("Settings")
         activate("Quota alerts: On")
         wait(lambda state: not state["quotaAlerts"])
+        if has("Named client keys"):
+            activate("Named client keys")
+            field("Client name, e.g. t3-code or codex-cli", "preview-t3-code")
+            activate("Create client key")
+            wait(lambda state: len(state["clientKeys"]) == 1 and state["clientKeys"][0]["active"])
+            activate("Refresh client keys")
+            activate("Copy client key")
+            wait(lambda state: state["notice"] == "Preview client key copy recorded; clipboard unchanged.")
+            capture("client-keys", "Refresh client keys")
+            required.update(("client-keys", "client-create", "client-copy", "client-revoke"))
         activate("Show diagnostics")
         wait(lambda state: bool(state["diagnostics"].get("accounts", {}).get("records")))
         activate("Refresh counters")
         activate("Capture pending activity")
         wait(lambda state: bool(state["diagnostics"].get("queue", {}).get("events")))
+        for summary in ("Accounts: available · 1 shown · 2 unrecognized · 3 omitted",
+                        "Upstream keys: available · 1 shown · 1 unrecognized · 2 omitted",
+                        "Activity: available · 1 shown · 2 unrecognized · 4 omitted"):
+            if ipc("omaproxy-preview", "hasText", summary) != "true":
+                raise RuntimeError("Missing displayed diagnostic summary: " + summary)
+        if has("Hide client keys"):
+            wait(lambda state: state["diagnostics"]["queue"]["events"][0].get("client_name") == "preview-t3-code")
+        if "diagnosticEventDetails" in (root / "BarWidget.qml").read_text():
+            for detail in ("2026-10-03T18:00:00Z", "model-preview", "HTTP 200", "First token 40 ms", "input tokens: 100", "output tokens: 23", "cached tokens: 0", "total tokens: 123"):
+                if ipc("omaproxy-preview", "containsText", detail) != "true":
+                    raise RuntimeError("Captured activity metadata was not rendered: " + detail)
         capture("diagnostics", "Refresh counters")
+        capture("activity-detail", "Activity: available · 1 shown · 2 unrecognized · 4 omitted")
+        if has("Hide client keys"):
+            activate("Revoke")
+            wait(lambda state: state["revokingClient"] == "preview-t3-code")
+            prior_trace = (root / "fixture-state/actions.jsonl").read_text().count('"command": "client-revoke"')
+            activate("Accounts")
+            wait(lambda state: not state["revokingClient"])
+            if (root / "fixture-state/actions.jsonl").read_text().count('"command": "client-revoke"') != prior_trace:
+                raise RuntimeError("Staged revocation reached the fixture bridge")
+            activate("Settings")
+            activate("Revoke")
+            activate("Confirm revocation")
+            wait(lambda state: not state["clientKeys"])
+            capture("client-keys-revoked", "Refresh client keys")
+            activate("Hide client keys")
         required.update(("routing", "routing-save", "diagnostics", "capture-activity"))
     if has("Remote"):
         activate("Remote")
@@ -337,14 +398,28 @@ def smoke(runtime, root):
     activate("Accounts")
     if has("Refresh providers"):
         wait(lambda state: bool(state["customProviders"]))
+        wait(lambda state: state["providerWeightsSupported"])
         activate("Test models")
         activate("Edit")
         wait(lambda state: state["editingProvider"] == "preview-provider")
+        field("Base URL, e.g. https://provider.example/v1", "https://provider.example.invalid/v2")
+        activate("Save provider")
+        wait(lambda state: state["customProviders"][0]["url"] == "https://provider.example.invalid/v2")
+        saves = [json.loads(line) for line in (root / "fixture-state/actions.jsonl").read_text().splitlines() if json.loads(line)["command"] == "custom-save"]
+        if "models" in saves[-1]["payload_fields"] or "url" not in saves[-1]["payload_fields"]:
+            raise RuntimeError("URL-only provider edit did not omit models")
+        if json.loads(ipc("omaproxy-preview", "state"))["customProviders"][0]["models"][0]["alias"] != "preview-model":
+            raise RuntimeError("URL-only provider edit changed aliases")
+        wait(lambda state: not state["addingKey"] and not state["editingProvider"])
+        activate("Edit")
+        capture("provider-url-only", "Save provider")
         field("Model IDs, or JSON with name and alias", '[{"name":"preview-upstream","alias":"preview-edited"}]')
         field("Optional weight (0 excludes this credential)", "2")
         activate("Save provider")
         wait(lambda state: state["customProviders"][0]["models"][0].get("alias") == "preview-edited")
-        wait(lambda state: state["customProviders"][0]["credential_count"] == 2 and state["customProviders"][0]["weights"][0] == 2)
+        wait(lambda state: state["customProviders"][0]["credential_count"] == 2 and state["customProviders"][0]["credentials"][0]["weight"] == 2)
+        wait(lambda state: not state["addingKey"] and not state["editingProvider"])
+        activate("Edit")
         capture("provider-edit", "Save provider")
         activate("Hide API provider form")
         activate("Remove")
@@ -363,19 +438,24 @@ def smoke(runtime, root):
         field("Model IDs, or JSON with name and alias", '[{"name":"preview-upstream","alias":"preview-new"}]')
         activate("Save provider")
         wait(lambda state: len(state["customProviders"]) == 1 and state["customProviders"][0]["name"] == "preview-new-provider")
-        activate("Hide API provider form")
+        wait(lambda state: not state["addingKey"])
         required.update(("custom-list", "custom-test", "custom-save", "custom-remove"))
+    prior_refreshes = (root / "fixture-state/actions.jsonl").read_text().count('"command": "custom-list"')
     ipc("soojy.omaproxy", "close")
     ipc("soojy.omaproxy", "showPage", "accounts")
     wait(lambda state: state["opened"] and state["revealedEmails"] == 0 and state["passwordFieldsCleared"])
+    if "custom-list" in required:
+        wait(lambda state: not state["busy"] and (root / "fixture-state/actions.jsonl").read_text().count('"command": "custom-list"') > prior_refreshes)
     capture("accounts")
     trace = [json.loads(line)["command"] for line in (root / "fixture-state/actions.jsonl").read_text().splitlines()]
+    if "routing-save" in required and not any(json.loads(line).get("notification_requested") for line in (root / "fixture-state/actions.jsonl").read_text().splitlines()):
+        raise RuntimeError("Native quota refresh did not pass the alert opt-in flag")
     if not required.issubset(trace):
         raise RuntimeError("Missing fixture actions: " + repr(required - set(trace)))
     log = (root / "quickshell.log").read_text()
     if any(marker in log for marker in ("ReferenceError:", "TypeError:", "Unable to load configuration", "failed to load component")):
         raise RuntimeError("Native runtime errors in " + str(root / "quickshell.log"))
-    print(json.dumps({"native_smoke": "passed", "verified_actions": sorted(required), "concealed_email_reopen": True, "popup_captures": captures}), flush=True)
+    print(json.dumps({"native_smoke": "passed", "verified_actions": sorted(required), "cold_settings_preferences_before_navigation": cold_settings, "concealed_email_reopen": True, "popup_captures": captures}), flush=True)
 
 
 if __name__ == "__main__":
