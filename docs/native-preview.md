@@ -50,18 +50,32 @@ The smoke lane waits for fixture status and switches through native tab controls
 It detects the feature set in the checkout and verifies the corresponding
 handlers and state transitions:
 
+- Cold Settings startup with its initial status response deliberately delayed.
+  The lane observes the initial stopped snapshot and verifies that the queued
+  `preferences` request loads routing values before any tab navigation. It waits
+  for queued page refreshes to finish before activating subsequent controls.
 - Backend update check, reviewed fixture install and restore.
 - Weighted routing, conversation affinity, subagent affinity, cooldown toggles,
   duration and retry edits, rejecting blank or fractional retry inputs before
-  invoking the bridge, quota alert opt-in and opt-out.
-- Read-only diagnostics refresh and explicit fixture activity capture.
+  invoking the bridge, quota alert opt-in and opt-out, and alert-delivery errors
+  from an opted-in native quota refresh. The fixture sends no notifications.
+- Read-only diagnostics refresh and explicit fixture activity capture, displayed
+  retained/unrecognized/omitted counts, named client labels, timestamp, HTTP
+  status, model pseudonym, latency, first-token time and token counters.
+- Named client-key creation, refresh and copy, staged revocation reset on page
+  changes, and confirmed revocation. No raw key is generated, displayed or copied
+  by the fixture.
 - Provider discovery, editing JSON model aliases, preserving credential counts,
   credential weights, staged removal, confirmation reset on page changes,
-  confirmed removal and creation with dummy credentials.
+  confirmed removal and creation with dummy credentials. URL-only edits omit
+  unchanged models from the stdin payload and preserve aliases. The fixture
+  uses the `provider_weights_supported` capability and public credential rows.
+  Confirmed saves close the form; reopening starts with the refreshed values.
 - Remote connection save with dummy keys, saved client-key removal and local
   connection selection.
 
 It closes and reopens Accounts, checks that the email reveal state is empty,
+that password fields are cleared and that the active Accounts tab refreshes,
 captures the rendered cards, waits for complete PNG files, and checks the
 fixture command trace. It exits nonzero if a control, state transition or
 capture is missing. Field values use percent-encoded IPC transport so brackets
@@ -81,6 +95,8 @@ The scoped native control bridge keeps the lane executable despite that gap.
 
 Recorded validation on the development desktop used Quickshell 0.3.1 and the
 installed Omarchy components. The updater, controls and remote smoke lanes
-passed; their cards were visually inspected. The logs contained a host portal
-registration warning and no QML
-errors. The fixture never executed the real backend bridge.
+passed; their cards were visually inspected. The final controls lane also
+covered named client keys, public provider weights, diagnostic population
+counts, activity metadata, cold Settings startup and alert-delivery errors. The
+logs contained a host portal registration
+warning and no QML errors. The fixture never executed the real backend bridge.
