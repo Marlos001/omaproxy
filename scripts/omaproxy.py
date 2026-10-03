@@ -106,7 +106,13 @@ def api(route, method="GET", body=None, timeout=4):
     cfg = settings()
     if not cfg:
         raise ValueError("Set up the proxy first.")
-    return request(f'http://127.0.0.1:{cfg["port"]}/v0/management/{route}',
+    if route.startswith("/"):
+        if not route.startswith(("/v0/management/", "/v8/management/")) or "#" in route:
+            raise ValueError("Use a supported management API path.")
+        path = route
+    else:
+        path = "/v0/management/" + route
+    return request(f'http://127.0.0.1:{cfg["port"]}{path}',
                    cfg["management_key"], method, body, timeout=timeout)
 
 
@@ -420,7 +426,7 @@ def read_json(path, fallback):
         return fallback
 
 
-def quota_snapshot(force=False):
+def quota_snapshot(force=False, notify=False):
     import quotas
     path = CONFIG / "quotas.json"
     cached = read_json(path, {"accounts": []})
@@ -457,7 +463,11 @@ def quota_snapshot(force=False):
             accounts = list(pool.map(refresh_account, files))
         result = {"accounts": accounts, "checked_at": time.time()}
         private_write(path, json.dumps(result) + "\n")
-        return {"quotas": result}
+        response = {"quotas": result}
+        if notify:
+            import quota_alerts
+            response["alerts"] = quota_alerts.process(result, CONFIG)
+        return response
 
 
 AUTH_ROUTES = {"claude": "anthropic", "codex": "codex", "antigravity": "antigravity",
@@ -533,7 +543,7 @@ def logs_snapshot():
 
 def custom_provider(payload):
     CONFIG.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with (CONFIG / "providers.lock").open("w") as lock:
+    with (CONFIG / "management.lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         return _custom_provider(payload)
 
@@ -571,14 +581,24 @@ def main():
     p.add_argument("--port", type=int, default=8317)
     for name in ("status", "start", "stop", "restart", "dashboard", "logs", "config", "logs-view",
                  "auth-status", "auth-cancel", "auth-open", "auth-callback", "custom-add", "preferences", "repair",
-                 "check-updates", "backend-update", "backend-rollback"):
+                 "check-updates", "backend-update", "backend-rollback",
+                 "diagnostics", "capture-activity", "routing-save", "custom-list", "custom-save", "client-keys"):
         sub.add_parser(name)
+    for name in ("client-create", "client-revoke", "client-copy"):
+        p = sub.add_parser(name)
+        p.add_argument("name")
+    for name in ("custom-remove", "custom-test"):
+        p = sub.add_parser(name)
+        p.add_argument("name")
+        if name == "custom-test":
+            p.add_argument("--credential-index", type=int, default=0)
     p = sub.add_parser("quotas")
     p.add_argument("--force", action="store_true")
+    p.add_argument("--notify", action="store_true", help="Opt in to deduplicated desktop quota alerts")
     p = sub.add_parser("auth-start")
     p.add_argument("provider", choices=list(AUTH_ROUTES))
     p = sub.add_parser("routing")
-    p.add_argument("strategy", choices=["round-robin", "fill-first"])
+    p.add_argument("strategy", choices=["round-robin", "weighted-round-robin", "fill-first"])
     p = sub.add_parser("autostart")
     p.add_argument("value", choices=["on", "off"])
     p = sub.add_parser("login")
@@ -606,7 +626,54 @@ def main():
             changed = repair_service()
             result = {"message": "Service repaired." if changed else "Service needs no repair."}
         elif args.action == "quotas":
-            result = quota_snapshot(args.force)
+            result = quota_snapshot(args.force, args.notify)
+        elif args.action in ("diagnostics", "capture-activity"):
+            import diagnostics
+            import client_keys
+            cfg = settings()
+            result = {"diagnostics": diagnostics.snapshot(api, salt=cfg["management_key"],
+                      consume_queue=args.action == "capture-activity")}
+            try:
+                named = client_keys.list_keys(api, CONFIG / "client-keys.json", cfg["management_key"])
+                labels = {row["key_label"]: row["name"] for row in named["client_keys"]}
+                for event in result["diagnostics"]["queue"]["events"]:
+                    if event.get("client_label") in labels:
+                        event["client_name"] = labels[event["client_label"]]
+            except (ValueError, OSError, urllib.error.URLError):
+                result["diagnostics"]["limitations"].append("Named client labels could not be resolved; anonymous receipts remain available.")
+        elif args.action in ("client-keys", "client-create", "client-revoke", "client-copy"):
+            import client_keys
+            cfg = settings()
+            key_args = (api, CONFIG / "client-keys.json", cfg["management_key"])
+            if args.action == "client-keys":
+                result = client_keys.list_keys(*key_args, primary_key=cfg["api_key"])
+            else:
+                CONFIG.mkdir(parents=True, exist_ok=True, mode=0o700)
+                with (CONFIG / "management.lock").open("w") as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    operation = {"client-create": client_keys.create_key, "client-revoke": client_keys.revoke_key,
+                                 "client-copy": client_keys.copy_key}[args.action]
+                    result = operation(*key_args, args.name, primary_key=cfg["api_key"])
+                    result["message"] = {"client-create": "Client key created. Copy it into the intended client.",
+                        "client-revoke": "Client key revoked.", "client-copy": "Client key copied to clipboard."}[args.action]
+        elif args.action in ("custom-list", "custom-save", "custom-remove", "custom-test"):
+            import providers
+            import routing
+            if args.action == "custom-list":
+                result = providers.list_providers(api)
+            elif args.action == "custom-test":
+                result = providers.test_provider(api, args.name, request, credential_index=args.credential_index)
+            else:
+                CONFIG.mkdir(parents=True, exist_ok=True, mode=0o700)
+                with (CONFIG / "management.lock").open("w") as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    if args.action == "custom-remove":
+                        result = providers.remove_provider(api, args.name)
+                    else:
+                        result = providers.upsert_provider(api, json.loads(sys.stdin.readline()),
+                                 weights_supported=routing.supports_weights(settings().get("version")))
+                        result.update(providers.list_providers(api))
+            result["provider_weights_supported"] = routing.supports_weights(settings().get("version"))
         elif args.action.startswith("auth-"):
             payload = json.loads(sys.stdin.readline()) if args.action == "auth-callback" else None
             result = auth_action(args.action, getattr(args, "provider", None), payload)
@@ -615,10 +682,17 @@ def main():
         elif args.action == "logs-view":
             result = logs_snapshot()
         elif args.action == "preferences":
-            result = {"preferences": {"routing": api("routing/strategy").get("strategy", "")}}
-        elif args.action == "routing":
-            api("routing/strategy", "PUT", {"value": args.strategy})
-            result = {"message": "Routing strategy updated.", "preferences": {"routing": args.strategy}}
+            import routing
+            result = {"routing_settings": routing.read_settings(api, settings().get("version"))}
+            result["preferences"] = {"routing": result["routing_settings"]["values"].get("strategy", "")}
+        elif args.action in ("routing", "routing-save"):
+            import routing
+            payload = {"strategy": args.strategy} if args.action == "routing" else json.loads(sys.stdin.readline())
+            CONFIG.mkdir(parents=True, exist_ok=True, mode=0o700)
+            with (CONFIG / "management.lock").open("w") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                result = routing.update_settings(api, payload, settings().get("version"))
+            result["preferences"] = {"routing": result["routing_settings"]["values"].get("strategy", "")}
         elif args.action in ("start", "stop", "restart"):
             systemctl(args.action)
             result = {"message": f"Proxy {args.action} requested."}

@@ -19,6 +19,21 @@ Panel {
     property var auth: ({})
     property var preferences: ({})
     property var updates: ({})
+    property var routingSettings: ({values: {}, capabilities: {}, strategies: []})
+    property var diagnostics: ({})
+    property var customProviders: []
+    property bool providerWeightsSupported: false
+    property bool showingDiagnostics: false
+    property bool showingRouting: false
+    property bool pageRefreshPending: false
+    property string editingProvider: ""
+    property string originalProviderUrl: ""
+    property string originalProviderModels: ""
+    property string removingProvider: ""
+    property var clientKeys: []
+    property bool showingClientKeys: false
+    property string revokingClient: ""
+    readonly property bool quotaAlerts: setting("quotaAlerts", false) === true
     readonly property bool showExtraLimits: setting("showExtraLimits", false) === true
     property var revealedEmails: ({})
     property string notice: ""
@@ -40,9 +55,10 @@ Panel {
     implicitHeight: button.implicitHeight
 
     function refresh() { if (!poll.running) poll.running = true }
+    function refreshActivePage() { pageRefreshPending = page === 1 || page === 2 }
     function refreshQuotas(force) {
         if (!quotaPoll.running && snapshot.running) {
-            quotaPoll.command = ["python3", "-B", helper, "quotas"].concat(force ? ["--force"] : [])
+            quotaPoll.command = ["python3", "-B", helper, "quotas"].concat(force ? ["--force"] : []).concat(quotaAlerts ? ["--notify"] : [])
             quotaPoll.running = true
         }
     }
@@ -51,6 +67,11 @@ Panel {
         noticeError = false
         notice = ""
         clipboard.command = ["python3", "-B", helper, "copy", kind]
+        clipboard.running = true
+    }
+    function copyClientKey(name) {
+        if (clipboard.running) return
+        clipboard.command = ["python3", "-B", helper, "client-copy", name]
         clipboard.running = true
     }
     function perform(args, payload) {
@@ -77,8 +98,15 @@ Panel {
         }
         if (result.preferences) preferences = result.preferences
         if (result.updates) updates = result.updates
+        if (result.routing_settings) routingSettings = result.routing_settings
+        if (result.diagnostics) diagnostics = result.diagnostics
+        if (result.custom_providers) customProviders = result.custom_providers
+        if (result.custom_provider) { addingKey = false; editingProvider = ""; providerKey.text = "" }
+        if (result.client_keys) clientKeys = result.client_keys
+        if (result.provider_weights_supported !== undefined) providerWeightsSupported = result.provider_weights_supported
         if (result.logs !== undefined) logText = result.logs
         if (result.message) notice = result.message
+        if (result.alerts && result.alerts.error) { noticeError = true; notice = result.alerts.error }
     }
     function setDisplaySetting(name, value) {
         var next = Object.assign({}, settings)
@@ -87,6 +115,62 @@ Panel {
         if (bar && bar.shell) bar.shell.updateEntryInline(moduleName, next)
     }
     function accountLabel(a) { return a.email || a.label || a.name || "Account" }
+    function diagnosticSummary(section) {
+        if (!section || !section.availability) return "Not loaded"
+        return section.availability + (section.retained === undefined ? "" : " · " + section.retained + " shown · " + (section.invalid || 0) + " unrecognized · " + (section.omitted || 0) + " omitted")
+    }
+    function diagnosticEventDetails(event) {
+        var parts = []
+        if (event.timestamp) parts.push(event.timestamp)
+        if (event.provider) parts.push(event.provider)
+        if (event.model_label) parts.push(event.model_label)
+        if (typeof event.status_code === "number") parts.push("HTTP " + event.status_code)
+        if (typeof event.ttft_ms === "number") parts.push("First token " + event.ttft_ms + " ms")
+        Object.keys(event.tokens || {}).forEach(function(field) { parts.push(field.replace(/_/g, " ") + ": " + event.tokens[field]) })
+        return parts.join(" · ")
+    }
+    function editProvider(provider) {
+        editingProvider = provider.name
+        providerName.text = provider.name
+        providerUrl.text = provider.url
+        providerModels.text = JSON.stringify(provider.models)
+        originalProviderUrl = providerUrl.text
+        originalProviderModels = providerModels.text
+        providerKey.text = ""
+        providerWeight.text = ""
+        providerCredential.text = "0"
+        addingKey = true
+    }
+    function newProvider() {
+        editingProvider = ""
+        providerName.text = ""
+        providerUrl.text = ""
+        providerModels.text = ""
+        providerKey.text = ""
+        providerWeight.text = ""
+        providerCredential.text = "0"
+        addingKey = true
+    }
+    function saveProvider() {
+        try {
+            var models = providerModels.text.trim()
+            var payload = {name: providerName.text, key: providerKey.text}
+            if (!editingProvider || providerUrl.text !== originalProviderUrl) payload.url = providerUrl.text
+            if (!editingProvider || providerModels.text !== originalProviderModels) payload.models = models[0] === "[" ? JSON.parse(models) : models
+            if (providerKey.text !== "" || providerWeight.text.trim() !== "") payload.credential_index = Number(providerCredential.text)
+            if (providerWeight.text.trim() !== "") payload.weight = Number(providerWeight.text)
+            perform(["custom-save"], payload)
+            providerKey.text = ""
+        } catch (e) { noticeError = true; notice = "Enter model IDs or a valid JSON model list." }
+    }
+    function saveRetryLimits() {
+        if (![retryRounds.text, retryCredentials.text, retryWait.text].every(function(value) { return /^[0-9]+$/.test(value.trim()) })) {
+            noticeError = true
+            notice = "Enter a whole number in each retry field."
+            return
+        }
+        perform(["routing-save"], {"request-retry": Number(retryRounds.text), "max-retry-credentials": Number(retryCredentials.text), "max-retry-interval": Number(retryWait.text)})
+    }
     function toggleEmail(name) {
         var next = Object.assign({}, revealedEmails)
         next[name] = !next[name]
@@ -122,10 +206,22 @@ Panel {
     }
 
     onOpenedChanged: {
-        if (opened) { refresh(); refreshQuotas(false); if (snapshot.configured && !authPoll.running) authPoll.running = true }
-        else revealedEmails = ({})
+        if (opened) {
+            refresh(); refreshQuotas(false)
+            if (snapshot.configured && !authPoll.running) authPoll.running = true
+            refreshActivePage()
+        } else {
+            revealedEmails = ({}); removingProvider = ""; revokingClient = ""
+            providerKey.text = ""; callback.text = ""; addingKey = false; editingProvider = ""
+            pageRefreshPending = false
+        }
     }
-    onPageChanged: { scroll.contentY = 0; if (page === 2 && snapshot.running) perform(["preferences"]) }
+    onPageChanged: {
+        scroll.contentY = 0
+        removingProvider = ""
+        revokingClient = ""
+        refreshActivePage()
+    }
     Component.onCompleted: refresh()
 
     IpcHandler {
@@ -156,6 +252,7 @@ Panel {
                         if (result.quotas) root.quotaData = result.quotas
                         var newNames = (result.accounts || []).map(function(a) { return a.name }).join("|")
                         if (root.opened && result.running && (!wasRunning || oldNames !== newNames)) root.refreshQuotas(false)
+                        if (root.opened && result.running && !wasRunning) root.refreshActivePage()
                     } else root.receive(result)
                 } catch (e) { root.notice = "Unable to read proxy status."; root.noticeError = true }
             }
@@ -168,7 +265,7 @@ Panel {
                 try {
                     var result = JSON.parse(text)
                     if (result.quotas) root.quotaData = result.quotas
-                    else root.receive(result)
+                    root.receive(result)
                 } catch (e) { root.notice = "Unable to read account limits."; root.noticeError = true }
             }
         }
@@ -205,8 +302,18 @@ Panel {
             }
         }
     }
+    Timer {
+        interval: 100
+        running: root.opened && root.snapshot.running && root.pageRefreshPending && !root.busy
+        repeat: false
+        onTriggered: {
+            root.pageRefreshPending = false
+            if (root.page === 2) root.perform(["preferences"])
+            else if (root.page === 1) root.perform(["custom-list"])
+        }
+    }
     Timer { interval: root.opened ? 5000 : 20000; running: true; repeat: true; onTriggered: root.refresh() }
-    Timer { interval: 60000; running: root.opened && root.snapshot.running; repeat: true; onTriggered: root.refreshQuotas(false) }
+    Timer { interval: root.opened ? 60000 : 300000; running: (root.opened || root.quotaAlerts) && root.snapshot.running; repeat: true; onTriggered: root.refreshQuotas(false) }
     Timer { interval: 2000; running: root.signingIn; repeat: true; onTriggered: if (!authPoll.running && !root.busy) authPoll.running = true }
     Timer { interval: 10000; running: root.opened; repeat: true; onTriggered: root.now = Date.now() / 1000 }
 
@@ -528,22 +635,53 @@ Panel {
                             }
                         }
                         PanelSeparator { foreground: root.foreground }
-                        ActionButton { text: root.addingKey ? "Hide API provider form" : "+ API-key provider"; onClicked: root.addingKey = !root.addingKey }
+                        Label { text: "API-key providers"; font.bold: true }
+                        ActionButton { text: "Refresh providers"; enabled: root.snapshot.running && !root.busy; onClicked: root.perform(["custom-list"]) }
+                        Repeater {
+                            model: root.customProviders
+                            Column {
+                                required property var modelData
+                                width: body.width
+                                spacing: Style.space(6)
+                                Label { width: parent.width; text: modelData.name + " · " + modelData.credential_count + " credential(s)"; wrapMode: Text.WordWrap }
+                                Repeater {
+                                    model: modelData.credentials || []
+                                    Hint { required property var modelData; text: "Credential " + modelData.index + " · weight " + (modelData.weight === null || modelData.weight === undefined ? "1 (default)" : modelData.weight) }
+                                }
+                                Row {
+                                    spacing: Style.space(6)
+                                    ActionButton { text: "Edit"; enabled: !root.busy; onClicked: root.editProvider(modelData) }
+                                    ActionButton { text: "Test models"; enabled: root.snapshot.running && !root.busy; onClicked: root.perform(["custom-test", modelData.name]) }
+                                    ActionButton {
+                                        text: root.removingProvider === modelData.name ? "Confirm removal" : "Remove"
+                                        enabled: root.snapshot.running && !root.busy
+                                        onClicked: {
+                                            if (root.removingProvider === modelData.name) { root.perform(["custom-remove", modelData.name]); root.removingProvider = "" }
+                                            else root.removingProvider = modelData.name
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Hint { text: "Test models performs model discovery only. It does not send an inference request." }
+                        ActionButton { text: root.addingKey ? "Hide API provider form" : "+ API-key provider"; onClicked: { if (root.addingKey) root.addingKey = false; else root.newProvider() } }
                         Column {
                             visible: root.addingKey
                             width: parent.width
                             spacing: Style.space(8)
-                            Hint { text: "Add an OpenAI-compatible endpoint. Quota availability depends on the provider." }
-                            Field { id: providerName; placeholderText: "Name, e.g. zai" }
+                            Hint { text: root.editingProvider ? "Edit provider. A blank API key preserves its existing credentials." : "Add an OpenAI-compatible endpoint. Quotas may be unavailable." }
+                            Field { id: providerName; placeholderText: "Name, e.g. zai"; enabled: root.editingProvider === "" }
                             Field { id: providerUrl; placeholderText: "Base URL, e.g. https://provider.example/v1" }
                             Field { id: providerKey; placeholderText: "API key"; password: true }
-                            Field { id: providerModels; placeholderText: "Model IDs, separated by commas" }
+                            Field { id: providerModels; placeholderText: "Model IDs, or JSON with name and alias" }
+                            Hint { text: 'Aliases: [{"name":"upstream-model","alias":"coding-model"}]' }
+                            Field { id: providerCredential; placeholderText: "Credential index (0 is the first)"; visible: root.editingProvider !== "" }
+                            Field { id: providerWeight; placeholderText: "Optional weight (0 excludes this credential)"; visible: root.providerWeightsSupported }
                             ActionButton {
                                 text: "Save provider"
                                 enabled: root.snapshot.running && !root.busy
                                 onClicked: {
-                                    root.perform(["custom-add"], {name: providerName.text, url: providerUrl.text, key: providerKey.text, models: providerModels.text})
-                                    providerKey.text = ""
+                                    root.saveProvider()
                                 }
                             }
                         }
@@ -560,6 +698,12 @@ Panel {
                             tooltipText: "Show model-specific and shorter limits for all accounts"
                             onClicked: root.setDisplaySetting("showExtraLimits", !root.showExtraLimits)
                         }
+                        ActionButton {
+                            text: "Quota alerts: " + (root.quotaAlerts ? "On" : "Off")
+                            active: root.quotaAlerts
+                            onClicked: root.setDisplaySetting("quotaAlerts", !root.quotaAlerts)
+                        }
+                        Hint { text: "Optional alerts check limits every five minutes while closed. Stale or unknown limits never trigger low-allowance alerts." }
                         PanelSeparator { foreground: root.foreground }
                         Label { text: "Proxy settings"; font.bold: true }
                         ActionButton {
@@ -587,8 +731,84 @@ Panel {
                         Hint { text: "Balance requests across accounts, or use one account until its allowance is exhausted." }
                         Row {
                             spacing: Style.space(6)
-                            ActionButton { text: "Balance accounts"; active: root.preferences.routing === "round-robin"; enabled: root.snapshot.running && !root.busy; onClicked: root.perform(["routing", "round-robin"]) }
-                            ActionButton { text: "Fill first"; active: root.preferences.routing === "fill-first"; enabled: root.snapshot.running && !root.busy; onClicked: root.perform(["routing", "fill-first"]) }
+                            Repeater {
+                                model: root.routingSettings.strategies.length ? root.routingSettings.strategies : ["round-robin", "fill-first"]
+                                ActionButton {
+                                    required property string modelData
+                                    text: modelData === "round-robin" ? "Balance" : modelData === "weighted-round-robin" ? "Weighted" : "Fill first"
+                                    active: root.preferences.routing === modelData
+                                    enabled: root.snapshot.running && !root.busy
+                                    onClicked: root.perform(["routing", modelData])
+                                }
+                            }
+                        }
+                        ActionButton { text: root.showingRouting ? "Hide routing details" : "Routing details"; onClicked: root.showingRouting = !root.showingRouting }
+                        Column {
+                            visible: root.showingRouting
+                            width: parent.width
+                            spacing: Style.space(8)
+                            Repeater {
+                                model: [{field: "session-affinity", label: "Keep conversations on one account"},
+                                        {field: "session-affinity-subagents", label: "Subagents inherit the conversation account"},
+                                        {field: "disable-cooling", label: "Disable cooldowns"},
+                                        {field: "save-cooldown-status", label: "Persist cooldown state"}]
+                                ActionButton {
+                                    required property var modelData
+                                    width: parent.width
+                                    text: modelData.label + ": " + (root.routingSettings.values[modelData.field] ? "On" : "Off")
+                                    active: root.routingSettings.values[modelData.field] === true
+                                    enabled: root.snapshot.running && !root.busy && root.routingSettings.capabilities[modelData.field] === true
+                                    onClicked: { var change = {}; change[modelData.field] = !root.routingSettings.values[modelData.field]; root.perform(["routing-save"], change) }
+                                }
+                            }
+                            Field { id: affinityTtl; text: root.routingSettings.values["session-affinity-ttl"] || "1h"; placeholderText: "Conversation affinity duration, e.g. 1h" }
+                            ActionButton { text: "Save affinity duration"; enabled: root.snapshot.running && !root.busy && root.routingSettings.capabilities["session-affinity-ttl"] === true; onClicked: root.perform(["routing-save"], {"session-affinity-ttl": affinityTtl.text}) }
+                            Hint { text: "Additional retry rounds / credentials per round / maximum cooldown wait (seconds). A credential cap of 0 means all eligible credentials." }
+                            Row {
+                                width: parent.width
+                                spacing: Style.space(6)
+                                Field { id: retryRounds; width: (parent.width - parent.spacing * 2) / 3; text: String(root.routingSettings.values["request-retry"] === undefined ? 3 : root.routingSettings.values["request-retry"]) }
+                                Field { id: retryCredentials; width: (parent.width - parent.spacing * 2) / 3; text: String(root.routingSettings.values["max-retry-credentials"] === undefined ? 0 : root.routingSettings.values["max-retry-credentials"]) }
+                                Field { id: retryWait; width: (parent.width - parent.spacing * 2) / 3; text: String(root.routingSettings.values["max-retry-interval"] === undefined ? 30 : root.routingSettings.values["max-retry-interval"]) }
+                            }
+                            ActionButton { text: "Save retry limits"; enabled: root.snapshot.running && !root.busy && root.routingSettings.capabilities["request-retry"] === true && root.routingSettings.capabilities["max-retry-credentials"] === true && root.routingSettings.capabilities["max-retry-interval"] === true; onClicked: root.saveRetryLimits() }
+                            Repeater { model: root.routingSettings.limitations || []; Hint { required property string modelData; text: modelData } }
+                        }
+                        PanelSeparator { foreground: root.foreground }
+                        ActionButton { text: root.showingDiagnostics ? "Hide diagnostics" : "Show diagnostics"; enabled: root.snapshot.running && !root.busy; onClicked: { root.showingDiagnostics = !root.showingDiagnostics; if (root.showingDiagnostics) root.perform(["diagnostics"]) } }
+                        Column {
+                            visible: root.showingDiagnostics
+                            width: parent.width
+                            spacing: Style.space(8)
+                            ActionButton { text: "Refresh counters"; enabled: !root.busy; onClicked: root.perform(["diagnostics"]) }
+                            Hint { text: "Account counters describe backend attempts. Upstream-key counters exclude OAuth accounts; they are not client usage or billing totals." }
+                            Hint { text: "Accounts: " + root.diagnosticSummary(root.diagnostics.accounts) }
+                            Repeater {
+                                model: (root.diagnostics.accounts || {}).records || []
+                                Label { required property var modelData; width: parent.width; text: modelData.provider + " · " + modelData.label + " · " + modelData.success + " succeeded / " + modelData.failed + " failed"; wrapMode: Text.WrapAnywhere; font.pixelSize: Style.font.caption }
+                            }
+                            Repeater {
+                                model: (root.diagnostics.usage || {}).records || []
+                                Label { required property var modelData; width: parent.width; text: modelData.provider + " · " + modelData.label + " · " + modelData.success + " succeeded / " + modelData.failed + " failed"; wrapMode: Text.WrapAnywhere; font.pixelSize: Style.font.caption }
+                            }
+                            Hint { text: "Upstream keys: " + root.diagnosticSummary(root.diagnostics.usage) }
+                            Hint { text: ((root.diagnostics.accounts || {}).error || (root.diagnostics.usage || {}).error || "") }
+                            Hint { text: "Capture pending activity removes up to 50 usage events from the backend queue. Other collectors will not receive them. No prompts are retained." }
+                            ActionButton { text: "Capture pending activity"; enabled: !root.busy; onClicked: root.perform(["capture-activity"]) }
+                            Hint { text: (root.diagnostics.queue || {}).error || "" }
+                            Hint { text: "Activity: " + root.diagnosticSummary(root.diagnostics.queue) }
+                            Repeater {
+                                model: (root.diagnostics.queue || {}).events || []
+                                Column {
+                                    required property var modelData
+                                    width: parent.width
+                                    spacing: Style.space(4)
+                                    Label { width: parent.width; text: modelData.client_name || modelData.client_label || "Client unavailable"; font.pixelSize: Style.font.caption }
+                                    Label { width: parent.width; text: (modelData.request_label || "Request ID unavailable") + " · " + (modelData.account_label || "Account unavailable") + " · " + (modelData.outcome || "Outcome unavailable") + (typeof modelData.latency_ms === "number" ? " · " + modelData.latency_ms + " ms" : ""); wrapMode: Text.WrapAnywhere; font.pixelSize: Style.font.caption }
+                                    Hint { width: parent.width; text: root.diagnosticEventDetails(modelData); visible: text !== "" }
+                                }
+                            }
+                            Repeater { model: root.diagnostics.limitations || []; Hint { required property string modelData; text: modelData } }
                         }
                         PanelSeparator { foreground: root.foreground }
                         Label { text: "Connect your coding tools"; font.bold: true }
@@ -597,6 +817,39 @@ Panel {
                             spacing: Style.space(6)
                             ActionButton { text: "Copy endpoint"; enabled: !clipboard.running; onClicked: root.copyValue("endpoint") }
                             ActionButton { text: "Copy API key"; enabled: !clipboard.running; onClicked: root.copyValue("api-key") }
+                        }
+                        ActionButton {
+                            text: root.showingClientKeys ? "Hide client keys" : "Named client keys"
+                            enabled: root.snapshot.running && !root.busy
+                            onClicked: { root.showingClientKeys = !root.showingClientKeys; if (root.showingClientKeys) root.perform(["client-keys"]) }
+                        }
+                        Column {
+                            visible: root.showingClientKeys
+                            width: parent.width
+                            spacing: Style.space(8)
+                            Hint { text: "Create a separate key for each client, then configure that client with the endpoint and copied key. Existing clients keep working with the primary key." }
+                            Field { id: clientName; placeholderText: "Client name, e.g. t3-code or codex-cli" }
+                            ActionButton { text: "Create client key"; enabled: !root.busy && clientName.text.trim() !== ""; onClicked: root.perform(["client-create", clientName.text.trim()]) }
+                            ActionButton { text: "Refresh client keys"; enabled: !root.busy; onClicked: root.perform(["client-keys"]) }
+                            Repeater {
+                                model: root.clientKeys
+                                Column {
+                                    required property var modelData
+                                    width: body.width
+                                    spacing: Style.space(6)
+                                    Label { text: modelData.name + " · " + (modelData.active ? "Active" : "Creation unconfirmed or key removed"); width: parent.width; wrapMode: Text.WordWrap }
+                                    Row {
+                                        spacing: Style.space(6)
+                                        ActionButton { text: "Copy client key"; enabled: modelData.active && !clipboard.running && !root.busy; onClicked: root.copyClientKey(modelData.name) }
+                                        ActionButton {
+                                            text: root.revokingClient === modelData.name ? "Confirm revocation" : "Revoke"
+                                            enabled: !root.busy
+                                            onClicked: { if (root.revokingClient === modelData.name) { root.perform(["client-revoke", modelData.name]); root.revokingClient = "" } else root.revokingClient = modelData.name }
+                                        }
+                                    }
+                                }
+                            }
+                            Hint { text: "Revoking a key disconnects clients using it. Keys are copied only to the clipboard; prompts and raw keys are absent from diagnostics." }
                         }
                         ActionButton {
                             text: (root.showingModels ? "Hide" : "Show") + " models (" + (root.snapshot.models || []).length + ")"

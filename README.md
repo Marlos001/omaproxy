@@ -29,6 +29,10 @@ A native Quickshell plugin for quotas, accounts, and your local AI proxy.
 - **Ready for screenshots.** Emails are softly blurred by default. Click to reveal, click again to hide; closing the popup conceals them automatically. Inline logs redact email addresses.
 - **Honest quota states.** Unknown is not zero. A failed refresh preserves the last reading with a stale-data warning.
 - **Independent service.** The proxy keeps running when the desktop shell reloads.
+- **Routing controls.** Adjust supported strategies, session affinity, credential weights, and retry limits. See [routing and API providers](docs/routing.md).
+- **Private diagnostics.** Inspect available account counters and upstream-key aggregates, or explicitly capture the consuming activity queue. See [diagnostics and their limits](docs/diagnostics.md).
+- **Named client keys.** Create, copy, and revoke separate downstream keys while preserving the primary key. See [client keys](docs/client-keys.md).
+- **Optional quota alerts.** Enable low-quota, observed reset, and explicit authentication alerts. See [desktop alerts](docs/quota-alerts.md).
 
 <details>
 <summary><strong>See account management</strong></summary>
@@ -145,9 +149,9 @@ Integration tests use a separate proxy on an ephemeral loopback port and a mock 
 
 See [Codex and T3 compatibility checks](docs/client-compatibility.md) for Responses streaming, tool calls, WebSockets, interruption and optional real Codex CLI/app-server lanes. These fixtures verify local protocol behavior; actual T3 UI and authenticated provider behavior require separate acceptance checks.
 
-[Contributing](CONTRIBUTING.md) · [Architecture](docs/architecture.md) · [Report a bug](https://github.com/soojy/omaproxy/issues/new?template=bug_report.md)
+Use the [isolated native preview](docs/native-preview.md) to exercise the panel with fake receipts and installed Omarchy components without changing your live plugin or service.
 
-Use the [isolated native preview](docs/native-preview.md) to exercise updater controls with fake accounts in the installed Omarchy QML components. It leaves your configured plugin and backend untouched.
+[Contributing](CONTRIBUTING.md) · [Architecture](docs/architecture.md) · [Report a bug](https://github.com/soojy/omaproxy/issues/new?template=bug_report.md)
 
 ## Credits
 
