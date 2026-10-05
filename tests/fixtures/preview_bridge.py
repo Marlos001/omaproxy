@@ -119,6 +119,7 @@ def main():
         temporary = root / ("state-" + str(os.getpid()) + ".json")
         temporary.write_text(json.dumps(state))
         temporary.replace(state_file)
+    result.setdefault("connection_id", "remote-preview" if state.get("mode") == "remote" else "local")
     print(json.dumps(result))
 
 
