@@ -49,7 +49,7 @@ omarchy plugin add https://github.com/soojy/omaproxy --enable
 ```
 
 1. Open **OmaProxy** from the robot icon in your bar.
-2. Choose **Set up proxy**. The plugin downloads a pinned CLIProxyAPI release, verifies its SHA-256 against architecture-specific digests pinned in this plugin, and creates a user service.
+2. Once a backend release has security approval, choose **Set up proxy**. The plugin verifies its pinned architecture-specific SHA-256 and creates a user service. Automatic setup is currently withheld; see the [security assessment](docs/backend-security.md).
 3. Start the proxy, then select **Accounts → Add account** and finish the provider's browser sign-in.
 4. Open **Limits** to see your remaining allowance.
 
@@ -125,7 +125,7 @@ rm -f ~/.config/systemd/user/omaproxy.service
 systemctl --user daemon-reload
 ```
 
-Plugin updates leave the installed backend running. In **Settings → Backend updates**, check the actual installed version and latest upstream version, then explicitly install the reviewed update or restore the previous backend. Safe updates require `bwrap` and validate your configuration in an isolated namespace before replacing anything. A running proxy briefly restarts; a stopped proxy stays stopped.
+Plugin updates leave the installed backend running. In **Settings → Backend updates**, check the actual installed version and latest upstream version or restore a permitted previous state. Automatic setup and upgrades are currently withheld because the pinned and latest checked official binaries have unresolved vulnerability advisories. See the [security assessment](docs/backend-security.md). An approved update will require `bwrap` and isolated configuration validation; a running proxy briefly restarts and a stopped proxy stays stopped.
 
 See the [backend update and recovery guide](docs/backend-updates.md) and [installer trust policy](docs/installer-security.md). Stored credentials remain in `~/.config/omaproxy/` after removal. XDG overrides are supported; adjust the paths if you use them.
 

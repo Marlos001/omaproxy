@@ -204,7 +204,7 @@ def request(url, key=None, method="GET", body=None, timeout=4, response_headers=
         raise
 
 
-def api(route, method="GET", body=None, timeout=4, cfg=None):
+def api(route, method="GET", body=None, timeout=4, cfg=None, response_headers=None):
     cfg = cfg if cfg is not None else settings()
     if not cfg:
         raise ValueError("Set up the proxy first.")
@@ -220,7 +220,8 @@ def api(route, method="GET", body=None, timeout=4, cfg=None):
     if remote(cfg) and blocked.exists():
         raise ValueError("Remote management access was rejected. Check the key and remote access, then test and save in Settings.")
     try:
-        return request(base_url(cfg) + path, cfg["management_key"], method, body, timeout=timeout)
+        return request(base_url(cfg) + path, cfg["management_key"], method, body, timeout=timeout,
+                       response_headers=response_headers)
     except urllib.error.HTTPError as exc:
         if remote(cfg) and exc.code in (401, 403):
             private_write(blocked, "{}")
@@ -257,8 +258,9 @@ def status():
             result["error"] = "Proxy failed to start. Open Logs for details."
         return result
     try:
+        headers = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-            auth = pool.submit(api, "auth-files", cfg=cfg)
+            auth = pool.submit(api, "auth-files", cfg=cfg, response_headers=headers)
             models = pool.submit(request, result["endpoint"] + "/models", cfg["api_key"])
             files = auth.result().get("files", [])
             # Explicit allowlist: never pass tokens, API keys, or raw auth files to QML.
@@ -273,7 +275,8 @@ def status():
         result["running"] = True
         # Settings record installation intent; this header identifies the process.
         import backend_updates
-        observed = backend_updates.running_version(request, cfg)
+        observed = backend_updates.normalized_version(next((value for key, value in headers.items()
+                                                           if key.lower() == "x-cpa-version"), ""))
         if observed:
             result["version"] = observed
             result["version_source"] = "running"
@@ -429,6 +432,8 @@ def install_binary(destination=None):
     arch = {"x86_64": "amd64", "aarch64": "aarch64"}.get(platform.machine())
     if platform.system() != "Linux" or arch not in ARCHIVE_SHA256:
         raise ValueError("Automatic installation supports Linux x86_64 and aarch64.")
+    import backend_security
+    backend_security.require_release_approval(VERSION, arch, ARCHIVE_SHA256[arch])
     filename = f'CLIProxyAPI_{VERSION.lstrip("v")}_linux_{arch}.tar.gz'
     base = f"https://github.com/{REPO}/releases/download/{VERSION}/"
     expected = ARCHIVE_SHA256[arch]

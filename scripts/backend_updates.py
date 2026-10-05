@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import time
 import urllib.error
+import backend_security
 
 METADATA_MAX_BYTES = 512 * 1024
 CONFIG_MAX_BYTES = 2 * 1024 * 1024
@@ -82,6 +83,7 @@ def check_updates(bridge):
     result = {'reviewed_version': bridge.VERSION, 'latest_version': '', 'installed_version': '',
               'version_source': '', 'update_available': False, 'update_supported': False,
               'rollback_available': False, 'providers': [], 'error': ''}
+    result.update(backend_security.bridge_release_status(bridge))
     if cfg:
         try:
             target = managed_binary(bridge, cfg)
@@ -110,8 +112,11 @@ def check_updates(bridge):
             raise ValueError('The release server returned invalid release metadata.')
         result['latest_version'] = latest
     except (OSError, ValueError, urllib.error.URLError):
-        result['error'] = result['error'] or 'Latest release could not be checked. The reviewed release remains available.'
-    result['update_available'] = is_newer(bridge.VERSION, result['installed_version'])
+        result['error'] = result['error'] or 'Latest release could not be checked. The pinned release metadata is unchanged.'
+    result['update_available'] = result['release_approved'] and is_newer(bridge.VERSION, result['installed_version'])
+    if not result['release_approved']:
+        result['update_supported'] = False
+        result['error'] = result['security_error'] + (' ' + result['error'] if result['error'] else '')
     return {'updates': result}
 
 
@@ -255,6 +260,10 @@ def change_backend(bridge, rollback=False):
         except BlockingIOError:
             raise ValueError('Another backend update is in progress.') from None
         _recover_pending(bridge)
+        if not rollback:
+            security = backend_security.bridge_release_status(bridge)
+            if not security['release_approved']:
+                raise ValueError(security['security_error'])
         cfg = bridge.settings()
         target = managed_binary(bridge, cfg)
         old_info = probe(target)
@@ -372,9 +381,11 @@ def _require_matching_running_version(bridge, cfg, installed):
 
 
 def _receipt(bridge, info, restarted, message):
+    security = backend_security.bridge_release_status(bridge)
     return {'message': message, 'updates': {'installed_version': info['version'], 'latest_version': '',
             'reviewed_version': bridge.VERSION, 'version_source': 'executable',
-            'update_available': is_newer(bridge.VERSION, info['version']),
-            'update_supported': update_supported(bridge), 'rollback_available':
+            'update_available': security['release_approved'] and is_newer(bridge.VERSION, info['version']),
+            'update_supported': security['release_approved'] and update_supported(bridge), 'rollback_available':
             (bridge.DATA / 'backend-backup' / 'receipt.json').is_file(),
-            'providers': provider_capabilities(bridge, info), 'restarted': restarted, 'error': ''}}
+            **security, 'providers': provider_capabilities(bridge, info), 'restarted': restarted,
+            'error': security['security_error']}}

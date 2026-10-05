@@ -1,6 +1,8 @@
 # Backend installer trust policy
 
-Automatic setup supports the following **CLIProxyAPI v8.0.13** Linux release archives. Their SHA-256 digests are embedded in `ARCHIVE_SHA256` in [the installer](../scripts/omaproxy.py), so the exact reviewed plugin commit is the trust anchor.
+Automatic setup is currently withheld pending a patched upstream build and security review. The following **CLIProxyAPI v8.0.13** artifacts remain pinned for reproducible inspection, but are not approved for automatic installation. See the [backend security assessment](backend-security.md).
+
+Their SHA-256 digests are embedded in `ARCHIVE_SHA256` in [the installer](../scripts/omaproxy.py). The exact plugin commit binds artifact identity; the separate, currently empty security approval allowlist binds version, architecture and digest before setup or upgrade can download or execute a candidate.
 
 | Architecture | Archive | Pinned SHA-256 |
 | --- | --- | --- |

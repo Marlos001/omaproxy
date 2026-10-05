@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1] / 'scripts'))
 import omaproxy as bridge
+import backend_security
 
 
 class Response(io.BytesIO):
@@ -27,6 +28,9 @@ class Response(io.BytesIO):
 
 class InstallerTests(unittest.TestCase):
     def setUp(self):
+        approval = patch.object(backend_security, 'APPROVED_RELEASES', frozenset(
+            (bridge.VERSION, arch, digest) for arch, digest in bridge.ARCHIVE_SHA256.items()))
+        approval.start(); self.addCleanup(approval.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)

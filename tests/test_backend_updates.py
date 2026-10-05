@@ -14,10 +14,16 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parents[1] / 'scripts'))
 import backend_updates as updates
 import omaproxy as bridge
+import backend_security
 
 
 class UpdateTests(unittest.TestCase):
     def setUp(self):
+        # Transaction fixtures model an approved synthetic artifact, not the
+        # vulnerable production download currently withheld by release policy.
+        approval = patch.object(backend_security, 'APPROVED_RELEASES', frozenset(
+            (bridge.VERSION, arch, digest) for arch, digest in bridge.ARCHIVE_SHA256.items()))
+        approval.start(); self.addCleanup(approval.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -110,6 +116,30 @@ class UpdateTests(unittest.TestCase):
             self.calls.clear()
             with self.assertRaisesRegex(ValueError, 'preserve current credentials'):
                 updates.change_backend(bridge, rollback=True)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.binary.read_bytes(), b'new binary')
+        self.assertEqual((bridge.CONFIG / 'config.yaml').read_text(), 'api-keys: [replacement-key]\n')
+
+    def test_security_hold_allows_guarded_prior_state_recovery_without_approving_it(self):
+        with patch.object(updates, 'validate_config'):
+            updates.change_backend(bridge)
+            with patch.object(backend_security, 'APPROVED_RELEASES', frozenset()):
+                receipt = updates.change_backend(bridge, rollback=True)
+        self.assertEqual(self.binary.read_bytes(), b'old binary')
+        self.assertEqual((bridge.CONFIG / 'config.yaml').read_text(), self.config)
+        self.assertEqual(receipt['updates']['installed_version'], 'v7.2.154')
+        self.assertFalse(receipt['updates']['release_approved'])
+        self.assertFalse(receipt['updates']['update_available'])
+        self.assertIn('security review', receipt['updates']['error'])
+
+    def test_security_hold_does_not_weaken_rollback_revoked_key_protection(self):
+        with patch.object(updates, 'validate_config'):
+            updates.change_backend(bridge)
+            bridge.private_write(bridge.CONFIG / 'config.yaml', 'api-keys: [replacement-key]\n')
+            self.calls.clear()
+            with patch.object(backend_security, 'APPROVED_RELEASES', frozenset()):
+                with self.assertRaisesRegex(ValueError, 'preserve current credentials'):
+                    updates.change_backend(bridge, rollback=True)
         self.assertEqual(self.calls, [])
         self.assertEqual(self.binary.read_bytes(), b'new binary')
         self.assertEqual((bridge.CONFIG / 'config.yaml').read_text(), 'api-keys: [replacement-key]\n')

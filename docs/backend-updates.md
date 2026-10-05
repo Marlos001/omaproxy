@@ -1,6 +1,8 @@
 # Backend updates
 
-OmaProxy installs the reviewed CLIProxyAPI release `v8.0.13`. GitHub's latest-release metadata is informational: downloading new metadata or adjacent checksums never changes the trusted version or SHA-256 pins. The manifest is the `VERSION` and `ARCHIVE_SHA256` constants in `scripts/omaproxy.py`; a future release requires a plugin change and review.
+Automatic installation and upgrades are currently withheld. The pinned v8.0.13 and the latest checked v8.0.15 official binaries still have vulnerability advisory matches. Checks remain available, and recovery/guarded rollback can restore a previously installed state. See the [security assessment and approval criteria](backend-security.md). Compatibility tests and checksums do not grant production rollout approval.
+
+GitHub's latest-release metadata is informational: downloading new metadata or adjacent checksums never changes the version or SHA-256 pins. The manifest is `VERSION` and `ARCHIVE_SHA256` in `scripts/omaproxy.py`; security approval additionally requires the exact version, architecture and digest in `backend_security.APPROVED_RELEASES`. That allowlist is empty. A future release requires a plugin change and review.
 
 | Linux asset | Compressed bytes | Reviewed SHA-256 |
 | --- | ---: | --- |
@@ -24,15 +26,17 @@ These commands return `{ "updates": { ... }, "message": "..." }`. `message` is o
 | `installed_version` | Actual running management header when available, otherwise the managed executable's help output |
 | `version_source` | `running` or `executable` |
 | `latest_version` | Latest stable GitHub release from a bounded metadata request; empty in update/rollback receipts |
-| `reviewed_version` | The only release this plugin can download |
-| `update_available` | Reviewed release is newer than the observed installed version |
-| `update_supported` | Managed installation and bubblewrap available; validation can still refuse incompatible configuration |
+| `reviewed_version` | Artifact pin under review; this field alone does not grant rollout approval |
+| `release_approved` | Exact version, host architecture and archive digest appear in the local security approval allowlist |
+| `security_error` | Reason automatic installation is withheld; empty only for an approved artifact |
+| `update_available` | Approved release is newer than the observed installed version |
+| `update_supported` | Security-approved managed installation and bubblewrap available; validation can still refuse incompatible configuration |
 | `rollback_available` | Private backup receipt exists; the rollback operation checks its integrity |
 | `providers` | Allowlisted provider names, IDs, login flags and availability from executable help |
 | `restarted` | In update/rollback receipts, whether a previously running service was restarted |
 | `error` | Safe display message for a failed metadata check or unsupported installation |
 
-Fatal action errors use the bridge's existing `{ "error": "..." }` result and a nonzero exit code. Credentials, backend output and configuration contents are never returned. Checking updates does not restart, replace, or rewrite the backend. Help probes run only on explicit updater actions, in an empty working directory and clean environment. Status prefers `X-CPA-VERSION` over the settings installation record when the management API supplies it.
+Fatal action errors use the bridge's existing `{ "error": "..." }` result and a nonzero exit code. Credentials, backend output and configuration contents are never returned. Checking updates does not restart, replace, or rewrite the backend. Help probes run only on explicit updater actions, in an empty working directory and clean environment. Status captures `X-CPA-VERSION` from its existing account request, avoiding a second management poll, and prefers it over the settings installation record.
 
 ## Validation, replacement and recovery
 
