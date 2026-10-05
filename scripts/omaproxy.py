@@ -2,6 +2,7 @@
 """OmaProxy's local bridge. Python standard library only; JSON stdout for QML."""
 import argparse
 import concurrent.futures
+import contextvars
 import fcntl
 import hashlib
 import gzip
@@ -25,6 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "omaproxy"
 DATA = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "omaproxy"
 UNIT = "omaproxy.service"
+CURRENT_CONFIG = contextvars.ContextVar("connection", default=None)
 REPO = "router-for-me/CLIProxyAPI"
 VERSION = "v7.2.154"
 # Trust anchors reviewed with this plugin snapshot; never derive these at install
@@ -39,6 +41,7 @@ BINARY_MAX_BYTES = 64 * 1024 * 1024
 METADATA_MAX_BYTES = 128 * 1024
 EXPANDED_ARCHIVE_MAX_BYTES = 66 * 1024 * 1024
 DOWNLOAD_CHUNK_BYTES = 64 * 1024
+REQUEST_MAX_BYTES = 2 * 1024 * 1024
 RELEASE_MEMBERS = {"cli-proxy-api", "LICENSE", "README.md", "README_CN.md", "config.example.yaml"}
 PROVIDERS = [
     ("claude", "Claude", "claude-login"),
@@ -70,10 +73,106 @@ def private_write(path, text):
 
 
 def settings():
+    selected = CURRENT_CONFIG.get()
+    if selected is not None:
+        return selected or None
+    connection = read_json(CONFIG / "connection.json", {})
+    if connection.get("mode") == "remote":
+        return dict(connection.get("remote", {}), mode="remote")
     path = CONFIG / "settings.json"
     if not path.exists():
         return None
     return json.loads(path.read_text())
+
+
+def remote(cfg):
+    return bool(cfg and cfg.get("mode") == "remote")
+
+
+def base_url(cfg):
+    return cfg["base_url"] if remote(cfg) else f'http://127.0.0.1:{cfg["port"]}'
+
+
+def connection_id(cfg):
+    if not remote(cfg):
+        return "local"
+    # Include credentials so changing access cannot reuse another account's cache.
+    value = json.dumps([cfg.get(k, "") for k in ("base_url", "management_key", "api_key")])
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def state_dir(cfg):
+    return CONFIG / "remote-state" / connection_id(cfg) if remote(cfg) else CONFIG
+
+
+def validate_base_url(value):
+    url = str(value).strip().rstrip("/")
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        port = parsed.port
+    except ValueError:
+        raise ValueError("Enter a valid server base URL.") from None
+    if (not parsed.hostname or parsed.username is not None or parsed.password is not None
+            or parsed.query or parsed.fragment or any(c.isspace() or ord(c) < 32 for c in url)
+            or "\\" in url or (port is not None and not 1 <= port <= 65535)):
+        raise ValueError("Enter a base URL without credentials, query parameters, or fragments.")
+    if parsed.scheme != "https" and not (parsed.scheme == "http" and parsed.hostname in ("localhost", "127.0.0.1", "::1")):
+        raise ValueError("Use HTTPS, or loopback HTTP for an SSH tunnel.")
+    if parsed.path.endswith(("/v1", "/v0/management", "/management.html")):
+        raise ValueError("Enter the server base URL, without /v1, /v0/management, or /management.html.")
+    return url
+
+
+def require_local(cfg=None):
+    if remote(cfg if cfg is not None else settings()):
+        raise ValueError("This action is available only for a local proxy. Manage the remote server in its management panel.")
+
+
+def connection_save(payload):
+    if type(payload.get("clear_api_key", False)) is not bool:
+        raise ValueError("Client-key removal must be a boolean.")
+    cfg = {"mode": "remote", "base_url": validate_base_url(payload.get("base_url", ""))}
+    previous = read_json(CONFIG / "connection.json", {}).get("remote", {})
+    for key in ("management_key", "api_key"):
+        value = str(payload.get(key, "")).strip()
+        # Blank fields preserve saved keys only for the same server.
+        cfg[key] = value or (previous.get(key, "") if previous.get("base_url") == cfg["base_url"] else "")
+        if any(ord(c) < 32 or ord(c) > 126 for c in cfg[key]):
+            raise ValueError("Keys must contain printable ASCII characters.")
+    if payload.get("clear_api_key") is True:
+        cfg["api_key"] = ""
+    if not cfg["management_key"]:
+        raise ValueError("Enter the server's management key.")
+    # Validate without changing the active connection or any server configuration.
+    account_rows(request(base_url(cfg) + "/v0/management/auth-files", cfg["management_key"]))
+    if cfg["api_key"]:
+        model_rows(request(base_url(cfg) + "/v1/models", cfg["api_key"]))
+    private_write(CONFIG / "connection.json", json.dumps({"mode": "remote", "remote": cfg}) + "\n")
+    for name in ("auth-error.json", "model-error.json"):
+        (state_dir(cfg) / name).unlink(missing_ok=True)
+    return {"connection_changed": True, "connection_id": connection_id(cfg),
+            "message": "Remote connection saved. Accounts and limits come from this server."}
+
+
+def connection_local():
+    connection = read_json(CONFIG / "connection.json", {})
+    connection["mode"] = "local"
+    private_write(CONFIG / "connection.json", json.dumps(connection) + "\n")
+    return {"connection_changed": True, "connection_id": "local", "message": "Local connection selected."}
+
+
+def account_rows(response):
+    rows = response.get("files") if isinstance(response, dict) else None
+    if not isinstance(rows, list) or any(not isinstance(row, dict) or not isinstance(row.get("name"), str) for row in rows):
+        raise ValueError("The server returned an invalid account list. Check its CLIProxyAPI version and base URL.")
+    return rows
+
+
+def model_rows(response):
+    rows = response.get("data") if isinstance(response, dict) else None
+    if not isinstance(rows, list) or any(not isinstance(row, dict) or not isinstance(row.get("id"), str) for row in rows):
+        raise ValueError("The server returned an invalid model list. Check the client API endpoint.")
+    return sorted({row["id"] for row in rows})
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -82,7 +181,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def request(url, key=None, method="GET", body=None, timeout=4):
+def request(url, key=None, method="GET", body=None, timeout=4, response_headers=None):
     headers = {"Accept": "application/json", "User-Agent": "OmaProxy/0.1"}
     if key:
         headers["Authorization"] = "Bearer " + key
@@ -92,19 +191,44 @@ def request(url, key=None, method="GET", body=None, timeout=4):
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     # Local control traffic must never leave via HTTP_PROXY/HTTPS_PROXY.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
-    with opener.open(req, timeout=timeout) as response:
-        return json.load(response)
+    try:
+        with opener.open(req, timeout=timeout) as response:
+            if response_headers is not None:
+                response_headers.update(response.headers)
+            raw = response.read(REQUEST_MAX_BYTES + 1)
+            if len(raw) > REQUEST_MAX_BYTES:
+                raise ValueError("Proxy response exceeds the JSON size limit.")
+            return json.loads(raw)
+    except urllib.error.HTTPError as exc:
+        exc.close()
+        raise
 
 
-def api(route, method="GET", body=None, timeout=4):
-    cfg = settings()
+def api(route, method="GET", body=None, timeout=4, cfg=None):
+    cfg = cfg if cfg is not None else settings()
     if not cfg:
         raise ValueError("Set up the proxy first.")
-    return request(f'http://127.0.0.1:{cfg["port"]}/v0/management/{route}',
-                   cfg["management_key"], method, body, timeout=timeout)
+    if method != "GET" and not remote(cfg) and (DATA / "backend-pending").exists():
+        raise ValueError("An interrupted backend update needs recovery. Run backend-update or backend-rollback before changing settings or keys.")
+    if route.startswith("/"):
+        if not route.startswith(("/v0/management/", "/v8/management/")) or "#" in route:
+            raise ValueError("Use a supported management API path.")
+        path = route
+    else:
+        path = "/v0/management/" + route
+    blocked = state_dir(cfg) / "auth-error.json"
+    if remote(cfg) and blocked.exists():
+        raise ValueError("Remote management access was rejected. Check the key and remote access, then test and save in Settings.")
+    try:
+        return request(base_url(cfg) + path, cfg["management_key"], method, body, timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        if remote(cfg) and exc.code in (401, 403):
+            private_write(blocked, "{}")
+        raise
 
 
 def systemctl(*args, check=True):
+    require_local()
     if args and args[0] in ("start", "restart", "enable"):
         repair_service()
     return run(["systemctl", "--user", *args, UNIT], check=check)
@@ -114,12 +238,16 @@ def status():
     cfg = settings()
     result = {"configured": bool(cfg), "running": False, "accounts": [],
               "models": [], "providers": [], "autostart": False,
-              "endpoint": "", "service": "not installed", "error": ""}
+              "endpoint": "", "service": "not installed", "error": "",
+              "mode": "remote" if remote(cfg) else "local", "connection_id": connection_id(cfg)}
+    result["remote_base_url"] = read_json(CONFIG / "connection.json", {}).get("remote", {}).get("base_url", "")
     if not cfg:
         return result
-    result.update(endpoint=f'http://127.0.0.1:{cfg["port"]}/v1',
+    result.update(endpoint=base_url(cfg) + "/v1",
                   version=cfg.get("version", "custom"),
                   providers=cfg.get("providers", []))
+    if remote(cfg):
+        return remote_status(cfg, result)
     state = systemctl("is-active", check=False).stdout.strip()
     result["service"] = state or "unknown"
     result["autostart"] = systemctl("is-enabled", check=False).stdout.strip() == "enabled"
@@ -130,7 +258,7 @@ def status():
         return result
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-            auth = pool.submit(api, "auth-files")
+            auth = pool.submit(api, "auth-files", cfg=cfg)
             models = pool.submit(request, result["endpoint"] + "/models", cfg["api_key"])
             files = auth.result().get("files", [])
             # Explicit allowlist: never pass tokens, API keys, or raw auth files to QML.
@@ -147,6 +275,53 @@ def status():
         result["error"] = "Service is active but its API is unavailable. Check Logs and configuration."
         result["quotas"] = read_json(CONFIG / "quotas.json", {"accounts": []})
     return result
+
+
+def remote_status(cfg, result):
+    result.update(base_url=base_url(cfg), service="unreachable", version="remote",
+                  providers=[{"id": p[0], "name": p[1], "available": False} for p in PROVIDERS],
+                  has_api_key=bool(cfg.get("api_key")),
+                  quotas=read_json(state_dir(cfg) / "quotas.json", {"accounts": []}))
+    if not cfg.get("management_key"):
+        result.update(configured=False, service="not configured")
+        return result
+    try:
+        files = account_rows(api("auth-files", cfg=cfg))
+        result["accounts"] = [{k: row.get(k) for k in
+            ("name", "auth_index", "provider", "type", "email", "label", "disabled", "status", "success", "failed")}
+            for row in files]
+        for account, row in zip(result["accounts"], files):
+            token_info = row.get("id_token")
+            plan = row.get("plan_type") or (token_info.get("plan_type") if isinstance(token_info, dict) else None)
+            account["plan"] = plan if isinstance(plan, str) else ""
+        result.update(running=True, service="connected")
+    except (OSError, ValueError) as exc:
+        result["error"] = remote_error(exc)
+        return result
+    blocked = state_dir(cfg) / "model-error.json"
+    if cfg.get("api_key") and not blocked.exists():
+        try:
+            result["models"] = model_rows(request(result["endpoint"] + "/models", cfg["api_key"]))
+        except (OSError, ValueError) as exc:
+            result["model_error"] = "Models unavailable. Check the client API key in Settings."
+            if isinstance(exc, urllib.error.HTTPError) and exc.code in (401, 403):
+                private_write(blocked, "{}")
+            if isinstance(exc, urllib.error.HTTPError):
+                exc.close()
+    elif blocked.exists():
+        result["model_error"] = "Client API access was rejected. Test and save the connection in Settings."
+    return result
+
+
+def remote_error(exc):
+    if isinstance(exc, urllib.error.HTTPError):
+        exc.close()
+        if exc.code in (401, 403):
+            return "Remote access was rejected. Check the keys and remote management access, then test and save in Settings."
+        return f"Remote server returned HTTP {exc.code}. Check the base URL and backend version."
+    if type(exc) is ValueError:
+        return str(exc)
+    return "Cannot reach the remote API. Check the server URL, TLS certificate, and network connection."
 
 
 def download(url, max_bytes):
@@ -288,6 +463,7 @@ def unit_working_directory(path):
 
 def repair_service():
     """Migrate only the known quoted WorkingDirectory emitted by <= 0.1.3."""
+    require_local()
     unit_dir = CONFIG.parent / "systemd/user"
     path = unit_dir / UNIT
     if not path.exists():
@@ -323,6 +499,7 @@ def repair_service():
 
 
 def setup(binary=None, port=8317):
+    require_local()
     if not 1024 <= port <= 65535:
         raise ValueError("Port must be between 1024 and 65535.")
     working_directory = unit_working_directory(CONFIG)
@@ -369,6 +546,7 @@ def setup(binary=None, port=8317):
 
 
 def login(provider):
+    require_local()
     cfg = settings()
     selected = next((p for p in cfg["providers"] if p["id"] == provider and p["available"]), None)
     if not selected:
@@ -384,7 +562,7 @@ def login(provider):
 
 def copy_value(kind):
     cfg = settings()
-    values = {"endpoint": f'http://127.0.0.1:{cfg["port"]}/v1',
+    values = {"endpoint": base_url(cfg) + "/v1",
               "api-key": cfg["api_key"], "management-key": cfg["management_key"]}
     # wl-copy forks a clipboard owner which can outlive this command. Captured
     # output pipes stay open in that child, making communicate() wait until its
@@ -402,18 +580,23 @@ def read_json(path, fallback):
         return fallback
 
 
-def quota_snapshot(force=False):
+def quota_snapshot(force=False, notify=False):
     import quotas
-    path = CONFIG / "quotas.json"
+    cfg = settings()
+    path = state_dir(cfg) / "quotas.json"
     cached = read_json(path, {"accounts": []})
-    lock_path = CONFIG / "quotas.lock"
+    lock_path = state_dir(cfg) / "quotas.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with lock_path.open("w") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return {"quotas": cached, "message": "Quota refresh already in progress."}
-        files = api("auth-files").get("files", [])
+        # Worker threads do not inherit ContextVars. Bind one connection to the
+        # whole refresh so a concurrent settings change cannot mix credentials.
+        def call_api(*args, **kwargs):
+            return api(*args, cfg=cfg, **kwargs) if cfg else api(*args, **kwargs)
+        files = account_rows(call_api("auth-files"))
         old = {a.get("auth_index") or a["name"]: a for a in cached.get("accounts", [])}
         def refresh_account(account):
             key = account.get("auth_index") or account["name"]
@@ -422,7 +605,7 @@ def quota_snapshot(force=False):
             if not force and time.time() - previous.get("checked_at", 0) < 60:
                 return dict(previous, **identity)
             try:
-                data = quotas.fetch(account, api)
+                data = quotas.fetch(account, call_api)
             except (OSError, ValueError, urllib.error.URLError, TypeError, AttributeError, KeyError):
                 data = {"windows": [], "error": "Quota check could not reach the provider. Try again shortly."}
             now = time.time()
@@ -439,7 +622,11 @@ def quota_snapshot(force=False):
             accounts = list(pool.map(refresh_account, files))
         result = {"accounts": accounts, "checked_at": time.time()}
         private_write(path, json.dumps(result) + "\n")
-        return {"quotas": result}
+        response = {"quotas": result}
+        if notify:
+            import quota_alerts
+            response["alerts"] = quota_alerts.process(result, state_dir(cfg))
+        return response
 
 
 AUTH_ROUTES = {"claude": "anthropic", "codex": "codex", "antigravity": "antigravity",
@@ -447,6 +634,7 @@ AUTH_ROUTES = {"claude": "anthropic", "codex": "codex", "antigravity": "antigrav
 
 
 def auth_action(action, provider=None, payload=None):
+    require_local()
     # Each bar instance has its own poller. Serialize read/modify/write so a
     # late poll cannot resurrect a cancelled session or replace a newer login.
     CONFIG.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -502,6 +690,7 @@ def _auth_action(action, provider=None, payload=None):
 
 
 def logs_snapshot():
+    require_local()
     output = run(["journalctl", "--user", "-u", UNIT, "-n", "70", "--no-pager", "-o", "cat"]).stdout
     cfg = settings()
     for key in ("api_key", "management_key"):
@@ -515,7 +704,7 @@ def logs_snapshot():
 
 def custom_provider(payload):
     CONFIG.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with (CONFIG / "providers.lock").open("w") as lock:
+    with (CONFIG / "management.lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         return _custom_provider(payload)
 
@@ -544,7 +733,7 @@ def _custom_provider(payload):
     return {"message": "API provider added. Its models are now available."}
 
 
-def main():
+def _main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--interactive", action="store_true", help="Keep terminal output visible after completion")
     sub = parser.add_subparsers(dest="action", required=True)
@@ -552,14 +741,25 @@ def main():
     p.add_argument("--binary", help="Use a local CLIProxyAPI or Plus executable")
     p.add_argument("--port", type=int, default=8317)
     for name in ("status", "start", "stop", "restart", "dashboard", "logs", "config", "logs-view",
-                 "auth-status", "auth-cancel", "auth-open", "auth-callback", "custom-add", "preferences", "repair"):
+                 "auth-status", "auth-cancel", "auth-open", "auth-callback", "custom-add", "preferences", "repair",
+                 "connection-save", "connection-local",
+                 "diagnostics", "capture-activity", "routing-save", "custom-list", "custom-save", "client-keys"):
         sub.add_parser(name)
+    for name in ("client-create", "client-revoke", "client-copy"):
+        p = sub.add_parser(name)
+        p.add_argument("name")
+    for name in ("custom-remove", "custom-test"):
+        p = sub.add_parser(name)
+        p.add_argument("name")
+        if name == "custom-test":
+            p.add_argument("--credential-index", type=int, default=0)
     p = sub.add_parser("quotas")
     p.add_argument("--force", action="store_true")
+    p.add_argument("--notify", action="store_true", help="Opt in to deduplicated desktop quota alerts")
     p = sub.add_parser("auth-start")
     p.add_argument("provider", choices=list(AUTH_ROUTES))
     p = sub.add_parser("routing")
-    p.add_argument("strategy", choices=["round-robin", "fill-first"])
+    p.add_argument("strategy", choices=["round-robin", "weighted-round-robin", "fill-first"])
     p = sub.add_parser("autostart")
     p.add_argument("value", choices=["on", "off"])
     p = sub.add_parser("login")
@@ -572,7 +772,14 @@ def main():
     p.add_argument("kind", choices=["endpoint", "api-key", "management-key"])
     args = parser.parse_args()
     try:
-        if args.action == "setup":
+        if args.action == "connection-save":
+            payload = json.loads(sys.stdin.readline())
+            if not isinstance(payload, dict):
+                raise ValueError("Enter connection settings as a JSON object.")
+            result = connection_save(payload)
+        elif args.action == "connection-local":
+            result = connection_local()
+        elif args.action == "setup":
             result = setup(args.binary, args.port)
         elif args.action == "status":
             result = status()
@@ -582,7 +789,54 @@ def main():
             changed = repair_service()
             result = {"message": "Service repaired." if changed else "Service needs no repair."}
         elif args.action == "quotas":
-            result = quota_snapshot(args.force)
+            result = quota_snapshot(args.force, args.notify)
+        elif args.action in ("diagnostics", "capture-activity"):
+            import diagnostics
+            import client_keys
+            cfg = settings()
+            result = {"diagnostics": diagnostics.snapshot(api, salt=cfg["management_key"],
+                      consume_queue=args.action == "capture-activity")}
+            try:
+                named = client_keys.list_keys(api, state_dir(cfg) / "client-keys.json", cfg["management_key"])
+                labels = {row["key_label"]: row["name"] for row in named["client_keys"]}
+                for event in result["diagnostics"]["queue"]["events"]:
+                    if event.get("client_label") in labels:
+                        event["client_name"] = labels[event["client_label"]]
+            except (ValueError, OSError, urllib.error.URLError):
+                result["diagnostics"]["limitations"].append("Named client labels could not be resolved; anonymous receipts remain available.")
+        elif args.action in ("client-keys", "client-create", "client-revoke", "client-copy"):
+            import client_keys
+            cfg = settings()
+            key_args = (api, state_dir(cfg) / "client-keys.json", cfg["management_key"])
+            if args.action == "client-keys":
+                result = client_keys.list_keys(*key_args, primary_key=cfg["api_key"])
+            else:
+                state_dir(settings()).mkdir(parents=True, exist_ok=True, mode=0o700)
+                with (state_dir(settings()) / "management.lock").open("w") as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    operation = {"client-create": client_keys.create_key, "client-revoke": client_keys.revoke_key,
+                                 "client-copy": client_keys.copy_key}[args.action]
+                    result = operation(*key_args, args.name, primary_key=cfg["api_key"])
+                    result["message"] = {"client-create": "Client key created. Copy it into the intended client.",
+                        "client-revoke": "Client key revoked.", "client-copy": "Client key copied to clipboard."}[args.action]
+        elif args.action in ("custom-list", "custom-save", "custom-remove", "custom-test"):
+            import providers
+            import routing
+            if args.action == "custom-list":
+                result = providers.list_providers(api)
+            elif args.action == "custom-test":
+                result = providers.test_provider(api, args.name, request, credential_index=args.credential_index)
+            else:
+                state_dir(settings()).mkdir(parents=True, exist_ok=True, mode=0o700)
+                with (state_dir(settings()) / "management.lock").open("w") as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    if args.action == "custom-remove":
+                        result = providers.remove_provider(api, args.name)
+                    else:
+                        result = providers.upsert_provider(api, json.loads(sys.stdin.readline()),
+                                 weights_supported=routing.supports_weights(settings().get("version")))
+                        result.update(providers.list_providers(api))
+            result["provider_weights_supported"] = routing.supports_weights(settings().get("version"))
         elif args.action.startswith("auth-"):
             payload = json.loads(sys.stdin.readline()) if args.action == "auth-callback" else None
             result = auth_action(args.action, getattr(args, "provider", None), payload)
@@ -591,10 +845,17 @@ def main():
         elif args.action == "logs-view":
             result = logs_snapshot()
         elif args.action == "preferences":
-            result = {"preferences": {"routing": api("routing/strategy").get("strategy", "")}}
-        elif args.action == "routing":
-            api("routing/strategy", "PUT", {"value": args.strategy})
-            result = {"message": "Routing strategy updated.", "preferences": {"routing": args.strategy}}
+            import routing
+            result = {"routing_settings": routing.read_settings(api, settings().get("version"))}
+            result["preferences"] = {"routing": result["routing_settings"]["values"].get("strategy", "")}
+        elif args.action in ("routing", "routing-save"):
+            import routing
+            payload = {"strategy": args.strategy} if args.action == "routing" else json.loads(sys.stdin.readline())
+            CONFIG.mkdir(parents=True, exist_ok=True, mode=0o700)
+            with (CONFIG / "management.lock").open("w") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                result = routing.update_settings(api, payload, settings().get("version"))
+            result["preferences"] = {"routing": result["routing_settings"]["values"].get("strategy", "")}
         elif args.action in ("start", "stop", "restart"):
             systemctl(args.action)
             result = {"message": f"Proxy {args.action} requested."}
@@ -612,18 +873,23 @@ def main():
         elif args.action == "copy":
             result = copy_value(args.kind)
         elif args.action == "dashboard":
-            run(["xdg-open", f'http://127.0.0.1:{settings()["port"]}/management.html'])
-            result = {"message": "Management panel opened. Use Copy management key to sign in."}
+            run(["xdg-open", base_url(settings()) + "/management.html"])
+            result = {"message": "Management panel opened. Sign in with your server's management key."}
         elif args.action == "config":
+            require_local()
             run(["xdg-open", str(CONFIG / "config.yaml")])
             result = {"message": "Proxy configuration opened."}
         else:
+            require_local()
             subprocess.run(["journalctl", "--user", "-u", UNIT, "-n", "100", "-f"], check=False)
             return
+        result.setdefault("connection_id", connection_id(settings()))
         print(json.dumps(result))
     except (ValueError, OSError, subprocess.SubprocessError, urllib.error.URLError, tarfile.TarError, EOFError) as exc:
         # HTTP bodies and command output can contain credentials; do not echo them.
-        if isinstance(exc, (tarfile.TarError, EOFError)):
+        if remote(settings()) or args.action == "connection-save":
+            message = remote_error(exc)
+        elif isinstance(exc, (tarfile.TarError, EOFError)):
             message = "Invalid release archive; installation stopped."
         elif isinstance(exc, urllib.error.HTTPError):
             message = f"Proxy API returned HTTP {exc.code}. Check the backend version and configuration."
@@ -633,9 +899,19 @@ def main():
             message = "Command failed. Check Logs for details."
         else:
             message = str(exc)
-        print(json.dumps({"error": message}))
+        print(json.dumps({"error": message, "connection_id": connection_id(settings())}))
         return 1
     return 0
+
+
+def main():
+    # A command retains the connection it started with, including multi-step
+    # account mutations. A later process may safely select another connection.
+    token = CURRENT_CONFIG.set(settings() or {})
+    try:
+        return _main()
+    finally:
+        CURRENT_CONFIG.reset(token)
 
 
 if __name__ == "__main__":
