@@ -234,10 +234,13 @@ def _recover_pending(bridge):
 
 def change_backend(bridge, rollback=False):
     bridge.CONFIG.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with (bridge.CONFIG / '.backend-update.lock').open('a') as lock:
+    with (bridge.CONFIG / '.backend-update.lock').open('a') as lock, \
+            (bridge.CONFIG / 'management.lock').open('a') as management_lock:
         os.chmod(lock.name, 0o600)
+        os.chmod(management_lock.name, 0o600)
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(management_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise ValueError('Another backend update is in progress.') from None
         _recover_pending(bridge)
@@ -272,6 +275,9 @@ def change_backend(bridge, rollback=False):
                     candidate_cfg = json.loads((backup / 'settings.json').read_text())
                 except (OSError, ValueError, KeyError):
                     raise ValueError('A valid private rollback backup is not available.') from None
+                current_digest = hashlib.sha256((bridge.CONFIG / 'config.yaml').read_bytes()).hexdigest()
+                if current_digest != receipt.get('live_config_sha256'):
+                    raise ValueError('Configuration changed since the update. Automatic rollback refused to preserve current credentials and settings.')
                 managed_binary(bridge, candidate_cfg)
             else:
                 bridge.install_binary(candidate)
@@ -310,6 +316,11 @@ def change_backend(bridge, rollback=False):
                 if running:
                     bridge.systemctl('start')
                     _wait_running(bridge, candidate_cfg, info['version'])
+                # A rollback must not resurrect keys revoked or replaced since
+                # this operation. Hash the post-start config because the backend
+                # can rewrite YAML or hash its management key during startup.
+                receipt['live_config_sha256'] = hashlib.sha256((bridge.CONFIG / 'config.yaml').read_bytes()).hexdigest()
+                bridge.private_write(snapshot / 'receipt.json', json.dumps(receipt) + '\n')
                 # Keep the last working state private. A completed rollback can be reversed.
                 old_backup = directory / 'old-backup'
                 if backup.exists():

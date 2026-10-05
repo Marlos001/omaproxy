@@ -97,12 +97,30 @@ class UpdateTests(unittest.TestCase):
     def test_rollback_restores_preserved_configuration_and_previous_executable(self):
         with patch.object(updates, 'validate_config'):
             updates.change_backend(bridge)
-            bridge.private_write(bridge.CONFIG / 'config.yaml', 'changed since update')
             receipt = updates.change_backend(bridge, rollback=True)
         self.assertEqual(receipt['updates']['installed_version'], 'v7.2.154')
         self.assertEqual(self.binary.read_bytes(), b'old binary')
         self.assertEqual((bridge.CONFIG / 'config.yaml').read_text(), self.config)
         self.assertEqual((bridge.DATA / 'backend-backup' / 'cli-proxy-api').read_bytes(), b'new binary')
+
+    def test_rollback_cannot_restore_keys_revoked_since_update(self):
+        with patch.object(updates, 'validate_config'):
+            updates.change_backend(bridge)
+            bridge.private_write(bridge.CONFIG / 'config.yaml', 'api-keys: [replacement-key]\n')
+            self.calls.clear()
+            with self.assertRaisesRegex(ValueError, 'preserve current credentials'):
+                updates.change_backend(bridge, rollback=True)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.binary.read_bytes(), b'new binary')
+        self.assertEqual((bridge.CONFIG / 'config.yaml').read_text(), 'api-keys: [replacement-key]\n')
+
+    def test_update_refuses_concurrent_management_mutation(self):
+        with (bridge.CONFIG / 'management.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaisesRegex(ValueError, 'in progress'):
+                updates.change_backend(bridge)
+        bridge.install_binary.assert_not_called()
+        self.assertEqual(self.calls, [])
 
     def test_corrupt_rollback_backup_is_refused_before_service_action(self):
         with patch.object(updates, 'validate_config'):
