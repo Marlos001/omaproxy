@@ -250,6 +250,15 @@ class UpdateTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'bubblewrap'):
                 updates.validate_config(bridge, self.binary, self.cfg, {'flags': set()}, self.root)
 
+    def test_sandbox_preserves_split_runtime_library_layout(self):
+        links = {'/lib': 'usr/lib', '/lib64': 'usr/lib64', '/bin': 'usr/bin'}
+        with patch.object(Path, 'is_symlink', return_value=True), \
+                patch.object(updates.os, 'readlink', side_effect=lambda path: links[str(path)]):
+            mounts = updates._runtime_mounts()
+        self.assertEqual(mounts, ['--ro-bind', '/usr', '/usr',
+            '--symlink', 'usr/lib', '/lib', '--symlink', 'usr/lib64', '/lib64',
+            '--symlink', 'usr/bin', '/bin'])
+
 
 class OptionalRealValidationTests(unittest.TestCase):
     @unittest.skipUnless(os.environ.get('OMAPROXY_TEST_BACKEND'), 'Set OMAPROXY_TEST_BACKEND for isolated executable validation')

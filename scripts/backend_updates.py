@@ -146,6 +146,18 @@ finally:
 '''
 
 
+def _runtime_mounts():
+    """Preserve the host's runtime layout, including Debian's separate lib64."""
+    args = ['--ro-bind', '/usr', '/usr']
+    for name in ('/lib', '/lib64', '/bin'):
+        path = Path(name)
+        if path.is_symlink():
+            args += ['--symlink', os.readlink(path), name]
+        elif path.is_dir():
+            args += ['--ro-bind', name, name]
+    return args
+
+
 def validate_config(bridge, binary, cfg, info, directory):
     """Ask the actual backend to parse the unchanged legacy config in isolation."""
     bwrap = shutil.which('bwrap')
@@ -160,9 +172,8 @@ def validate_config(bridge, binary, cfg, info, directory):
     (validation / 'config.yaml').chmod(0o600)
     # The namespace has only executable/runtime files and a private config copy.
     # Real HOME, credentials, service sockets and proxy environment are absent.
-    args = [bwrap, '--unshare-all', '--die-with-parent', '--new-session',
-            '--ro-bind', '/usr', '/usr', '--symlink', 'usr/lib', '/lib',
-            '--symlink', 'usr/lib', '/lib64', '--proc', '/proc', '--dev', '/dev',
+    args = [bwrap, '--unshare-all', '--die-with-parent', '--new-session'] + _runtime_mounts() + [
+            '--proc', '/proc', '--dev', '/dev',
             '--tmpfs', '/tmp', '--tmpfs', '/home', '--dir', '/root',
             '--ro-bind', str(binary), '/backend', '--bind', str(validation), '/validation',
             '--clearenv', '--setenv', 'HOME', '/home', '--chdir', '/validation',
