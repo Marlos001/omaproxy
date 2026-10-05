@@ -214,6 +214,8 @@ Panel {
         bar: root.bar
         text: "󰚩"
         active: root.snapshot.running
+        // A running proxy is healthy; WidgetButton defaults activeColor to urgent.
+        activeColor: Color.accent
         tooltipText: "OmaProxy · " + (root.snapshot.running ? "Account limits" : "Proxy stopped")
         onPressed: root.toggle()
         Rectangle {
