@@ -1,0 +1,61 @@
+name: Coding client compatibility
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compatibility:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: '7.2.154'
+            sha256: '2a2256ceff048d5fa813aa54e8daa43e870b40e698d5cd21efad46e25aa5a1f9'
+          - version: '8.0.13'
+            sha256: '50ecffb47fdd81c8c5a9825a73a7a905ab66342337e274f39c4276b92d3533f3'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install and verify the isolated validation sandbox
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes bubblewrap
+          bwrap --unshare-all --ro-bind / / -- /bin/true
+      - name: Install the tested Codex client
+        run: npm install --global @openai/codex@0.160.0
+      - name: Download the reviewed proxy artifact
+        env:
+          BACKEND_VERSION: ${{ matrix.version }}
+          BACKEND_SHA256: ${{ matrix.sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_archive="$RUNNER_TEMP/cli-proxy-api.tar.gz"
+          curl --fail --location --max-time 90 --proto '=https' --proto-redir '=https' \
+            "https://github.com/router-for-me/CLIProxyAPI/releases/download/v${BACKEND_VERSION}/CLIProxyAPI_${BACKEND_VERSION}_linux_amd64.tar.gz" \
+            --output "$task_archive"
+          printf '%s  %s\n' "$BACKEND_SHA256" "$task_archive" | sha256sum --check --status
+          tar -xzf "$task_archive" -C "$RUNNER_TEMP" cli-proxy-api
+          chmod 700 "$RUNNER_TEMP/cli-proxy-api"
+          printf 'OMAPROXY_TEST_BINARY=%s\n' "$RUNNER_TEMP/cli-proxy-api" >> "$GITHUB_ENV"
+          printf 'OMAPROXY_TEST_BACKEND=%s\n' "$RUNNER_TEMP/cli-proxy-api" >> "$GITHUB_ENV"
+          printf 'OMAPROXY_TEST_CODEX_BINARY=%s\n' "$(command -v codex)" >> "$GITHUB_ENV"
+      - name: Unit, backend and real-client contracts
+        run: python -m unittest discover -s tests -v
+      - name: JavaScript display checks
+        run: node tests/limit-model.test.cjs

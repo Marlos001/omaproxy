@@ -143,6 +143,8 @@ OMAPROXY_TEST_BINARY="$HOME/.local/share/omaproxy/cli-proxy-api" \
 
 Integration tests use a separate proxy on an ephemeral loopback port and a mock upstream. They do not use your accounts or send prompts to an AI provider. For structural QML edits, `omarchy restart shell` clears cached components; the proxy service survives the restart.
 
+See [Codex and T3 compatibility checks](docs/client-compatibility.md) for Responses streaming, tool calls, WebSockets, interruption and optional real Codex CLI/app-server lanes. These fixtures verify local protocol behavior; actual T3 UI and authenticated provider behavior require separate acceptance checks.
+
 [Contributing](CONTRIBUTING.md) · [Architecture](docs/architecture.md) · [Report a bug](https://github.com/soojy/omaproxy/issues/new?template=bug_report.md)
 
 Use the [isolated native preview](docs/native-preview.md) to exercise updater controls with fake accounts in the installed Omarchy QML components. It leaves your configured plugin and backend untouched.
