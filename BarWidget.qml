@@ -108,7 +108,10 @@ Panel {
         if (result.error) { noticeError = true; notice = result.error; return }
         if (result.connection_changed) {
             clearConnectionState()
-            snapshot = ({configured: false, running: false, accounts: [], models: [], providers: [], connection_id: result.connection_id})
+            snapshot = ({configured: false, running: false, accounts: [], models: [], providers: [],
+                connection_id: result.connection_id, mode: result.mode,
+                base_url: result.base_url || "", remote_base_url: result.remote_base_url || "",
+                has_api_key: result.has_api_key === true})
             quotaData = ({accounts: []})
             auth = ({})
             preferences = ({})
@@ -118,6 +121,8 @@ Panel {
             addingAccount = false
             addingKey = false
             editRemote = false
+            if (result.base_url !== undefined || result.remote_base_url !== undefined)
+                remoteUrl.text = result.base_url || result.remote_base_url || ""
         }
         if (result.auth !== undefined) {
             var wasWaiting = signingIn
@@ -475,7 +480,7 @@ Panel {
                     spacing: Style.space(16)
 
                     Column {
-                        visible: !root.snapshot.configured && root.page !== 2
+                        visible: !root.snapshot.configured && root.page !== 2 && !root.remoteConnection
                         width: parent.width
                         spacing: Style.space(16)
                         Label { text: "Your accounts. Your remaining capacity."; font.bold: true; width: parent.width; wrapMode: Text.WordWrap }
@@ -779,7 +784,7 @@ Panel {
                                 }
                             }
                         }
-                        ActionButton { visible: !root.snapshot.configured && !root.editRemote; text: "Set up local proxy"; enabled: !root.busy; onClicked: root.perform(["setup"]) }
+                        ActionButton { visible: !root.snapshot.configured && !root.editRemote && !root.remoteConnection; text: "Set up local proxy"; enabled: !root.busy; onClicked: root.perform(["setup"]) }
                         PanelSeparator { foreground: root.foreground }
                         Label { text: "Display"; font.bold: true }
                         ActionButton {
