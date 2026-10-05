@@ -82,7 +82,7 @@ class ControlsBridgeTests(unittest.TestCase):
         opted_in_result = json.loads(output.getvalue())
         self.assertEqual(opted_in_result["alerts"], {"alert_count": 0})
         process.assert_called_once()
-        api.assert_called_with("auth-files")
+        api.assert_called_with("auth-files", cfg=bridge.settings())
 
     def test_client_revoke_passes_primary_key_from_private_settings(self):
         settings = self.configure()
