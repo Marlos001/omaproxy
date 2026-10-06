@@ -1,4 +1,8 @@
-"""Reviewed backend updates. This module never trusts a remotely discovered pin."""
+"""Check release metadata and manage a reviewed backend artifact.
+
+The latest-release endpoint is informational. It does not select or approve
+the binary used by ``change_backend``.
+"""
 import fcntl
 import hashlib
 import json
@@ -55,11 +59,17 @@ def provider_capabilities(bridge, info):
 
 
 def update_supported(bridge):
+    """Report host prerequisites; release approval is checked separately."""
     return (bridge.platform.system() == 'Linux' and bridge.platform.machine() in ('x86_64', 'aarch64')
             and bool(shutil.which('bwrap')))
 
 
 def running_version(request, cfg):
+    """Return the recognized management version header, or empty on failure.
+
+    The localhost request has a two-second timeout. This lookup does not probe
+    the installed executable.
+    """
     headers = {}
     try:
         request(f'http://127.0.0.1:{cfg["port"]}/v0/management/auth-files',
@@ -71,6 +81,11 @@ def running_version(request, cfg):
 
 
 def managed_binary(bridge, cfg):
+    """Require the registered regular file at ``DATA/cli-proxy-api``.
+
+    Custom executables, stale paths, missing files, and symlinks fail closed so
+    update logic cannot replace a caller-managed backend.
+    """
     target = bridge.DATA / 'cli-proxy-api'
     if (not cfg or cfg.get('version') == 'custom' or cfg.get('binary') != str(target)
             or target.is_symlink() or not target.is_file()):
@@ -79,6 +94,15 @@ def managed_binary(bridge, cfg):
 
 
 def check_updates(bridge):
+    """Return update status without changing settings, binaries, or service state.
+
+    The latest release tag is informational; availability uses the locally
+    reviewed version and release approval. Host support is not approval. When
+    the service is active, a valid management header takes precedence over the
+    on-disk version; a missing or unrecognized header leaves the disk version
+    as the source. Executable, metadata, and security failures appear in
+    ``updates.error``.
+    """
     cfg = bridge.settings()
     result = {'reviewed_version': bridge.VERSION, 'latest_version': '', 'installed_version': '',
               'version_source': '', 'update_available': False, 'update_supported': False,
@@ -195,11 +219,17 @@ def validate_config(bridge, binary, cfg, info, directory):
 
 
 def _private_copy(source, target, executable=False):
+    """Copy bytes with private modes: 0700 for executables and 0600 otherwise."""
     shutil.copyfile(source, target)
     target.chmod(0o700 if executable else 0o600)
 
 
 def _replace_copy(source, target, executable=False):
+    """Atomically replace ``target`` with a private same-directory copy.
+
+    Same-directory staging lets readers see either the old file or the complete
+    replacement, never a partially copied binary or configuration file.
+    """
     fd, name = tempfile.mkstemp(dir=target.parent)
     os.close(fd)
     staged = Path(name)
@@ -211,6 +241,10 @@ def _replace_copy(source, target, executable=False):
 
 
 def _wait_running(bridge, cfg, expected):
+    """Require an active unit, the expected management version, and a models probe.
+
+    Failure raises so the caller can restore the saved files and prior service.
+    """
     for _ in range(20):
         if (bridge.systemctl('is-active', check=False).stdout.strip() == 'active'
                 and running_version(bridge.request, cfg) == expected):
@@ -221,7 +255,12 @@ def _wait_running(bridge, cfg, expected):
 
 
 def _recover_pending(bridge):
-    """A killed updater leaves a private snapshot; the next explicit action restores it."""
+    """Restore a verified snapshot left when an earlier update was interrupted.
+
+    Stop the service, restore the saved executable, settings, and config, then
+    restart only if the receipt says it was active. Invalid or incomplete
+    snapshots stop with an error and remain available for manual recovery.
+    """
     pending = bridge.DATA / 'backend-pending'
     if not pending.exists():
         return
@@ -249,6 +288,20 @@ def _recover_pending(bridge):
 
 
 def change_backend(bridge, rollback=False):
+    """Install the reviewed release or restore the last private backup.
+
+    Take nonblocking update and management locks, recover any pending snapshot,
+    then require release approval for forward updates. Rollback remains
+    available as guarded recovery during a security hold; it does not approve the
+    restored release. The live config must match the post-update hash stored in
+    the backup receipt, preserving later key revocations and settings. Validate the
+    candidate config in bubblewrap and publish the current binary, settings,
+    and config snapshot before changing a running service. An active service
+    must match the installed version before replacement. Restart it only if it
+    was active, then require the expected version and models endpoint to respond.
+    Failures restore the snapshot. Return the bridge response payload from
+    ``_receipt``.
+    """
     bridge.CONFIG.mkdir(parents=True, exist_ok=True, mode=0o700)
     with (bridge.CONFIG / '.backend-update.lock').open('a') as lock, \
             (bridge.CONFIG / 'management.lock').open('a') as management_lock:
@@ -381,6 +434,13 @@ def _require_matching_running_version(bridge, cfg, installed):
 
 
 def _receipt(bridge, info, restarted, message):
+    """Build the bridge response after an update or rollback.
+
+    ``latest_version`` remains empty; availability compares the installed
+    version with the reviewed version and requires release approval. The
+    ``restarted`` field records whether this operation restarted an active
+    service.
+    """
     security = backend_security.bridge_release_status(bridge)
     return {'message': message, 'updates': {'installed_version': info['version'], 'latest_version': '',
             'reviewed_version': bridge.VERSION, 'version_source': 'executable',

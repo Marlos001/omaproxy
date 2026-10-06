@@ -1,6 +1,6 @@
-# CLIProxyAPI backend security assessment (2026-10-05)
+# CLIProxyAPI backend security assessment (2026-10-06)
 
-The production v8.0.13 pin remains blocked. The latest official release checked was [v8.0.15](https://github.com/router-for-me/CLIProxyAPI/releases/tag/v8.0.15), published 2026-10-04T22:29:27Z; both Linux architectures still use Go 1.26.4 and match the same 17 advisories. No patched default Linux artifact is available in the latest official release. This is not an exhaustive statement about custom builds or other asset variants.
+The production v8.0.13 pin remains blocked. The latest official release checked was [v8.0.16](https://github.com/router-for-me/CLIProxyAPI/releases/tag/v8.0.16), published 2026-10-05T21:46:28Z; both Linux architectures still use Go 1.26.4 and match the same 17 advisories. No patched default Linux artifact is available in the latest official release. This is not an exhaustive statement about custom builds or other asset variants.
 
 Security inspection checked downloaded archive hashes against official metadata/checksums and scanned the extracted binaries without executing them. The installed v7.2.154 amd64 artifact also has the same 17 matches; withholding a new rollout does not remediate that existing installation.
 
@@ -15,7 +15,7 @@ go version -m /path/to/verified/cli-proxy-api
 /tmp/omaproxy-security-20261005/tools/govulncheck -mode=binary /path/to/verified/cli-proxy-api
 ```
 
-Each of the five binaries emitted 17 distinct advisory IDs at symbol level (173 symbol records), plus 24 package and 17 module records: 214 finding records total, not 214 vulnerabilities. JSON mode exits zero even with findings. Latest amd64 text mode exits 3 and reports 17 vulnerabilities. A CI gate must parse finding records or use text-mode exit status, and must distinguish scanner failure from a completed negative scan. [Official govulncheck documentation](https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck#hdr-Exit_codes).
+Each of the seven reviewed binaries emitted 17 distinct advisory IDs at symbol level (173 symbol records), plus 24 package and 17 module records: 214 finding records total, not 214 vulnerabilities. JSON mode exits zero even with findings. Latest amd64 text mode exits 3 and reports 17 vulnerabilities. A CI gate must parse finding records or use text-mode exit status, and must distinguish scanner failure from a completed negative scan. [Official govulncheck documentation](https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck#hdr-Exit_codes).
 
 Binary matches prove linked vulnerable symbols, not exploitability or per-configuration reachability; binary output cannot show call stacks. [Official limitations](https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck#hdr-Limitations).
 
@@ -30,12 +30,16 @@ All binary toolchains are Go 1.26.4. Archive digests below were independently re
 | `CLIProxyAPI_8.0.13_linux_amd64` | `50ecffb47fdd81c8c5a9825a73a7a905ab66342337e274f39c4276b92d3533f3` | `b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41` | 17 |
 | `CLIProxyAPI_8.0.15_linux_aarch64` | `172f1f71dc0381538c09f44a65c687b55035c61ff63f505a6b7edd4fc7b69c95` | `d7bf5df02b094f90435291d44526cd658beae4bec88eef01368c5dccc8132d8f` | 17 |
 | `CLIProxyAPI_8.0.15_linux_amd64` | `3acca2d978ba140b4b664bcfb74acea8f6c9a32c24fa6e2d58130f6c1128d3a8` | `426d9353288f810eb31b362e1e2ac9605b6c948e10147946f6f26cab187aa81d` | 17 |
+| `CLIProxyAPI_8.0.16_linux_aarch64` | `e84f37c92bf48a057e5c2ff3e2a30851a4e43c64efcf442473ea04a43b9ddebb` | `3e01096477acd04493126ca4c513cf065f36f54d6afc5e9a8ebb9dfc1489dbfd` | 17 |
+| `CLIProxyAPI_8.0.16_linux_amd64` | `affb5a189184e41b4335549e498df6f4f1c7f15dd0d04a28286becc2dfa78579` | `d67242f2cde3b944c7702b1a99a9ef5a0c0678aa6b1210923988429426768b4c` | 17 |
 
-Release metadata: [v8.0.13](https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/tags/v8.0.13), [v8.0.15](https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/tags/v8.0.15), [v7.2.154](https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/tags/v7.2.154). The v8.0.13 release workflow itself pins [GO_VERSION 1.26.4](https://github.com/router-for-me/CLIProxyAPI/blob/v8.0.13/.github/workflows/release.yaml#L14); this workflow, go.mod, API server, and Git token store are unchanged between v8.0.13 and v8.0.15.
+Release metadata: [v8.0.13](https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/tags/v8.0.13), [v8.0.15](https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/tags/v8.0.15), [v7.2.154](https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/tags/v7.2.154), [v8.0.16](https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/tags/v8.0.16). The v8.0.13 release workflow itself pins [GO_VERSION 1.26.4](https://github.com/router-for-me/CLIProxyAPI/blob/v8.0.13/.github/workflows/release.yaml#L14); this workflow, go.mod, API server, and Git token store are unchanged between v8.0.13 and v8.0.15.
+
+The v8.0.16 default archives independently match both GitHub asset digests and the [official checksum manifest](https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.16/checksums.txt). Both binaries record Go1.26.4 and CGO_ENABLED=1. All 100 embedded dependency version/checksum pairs match both architectures of v8.0.13 and v8.0.15. Complete v8.0.16 JSON streams were parsed to their end (496 protocol records each); no scanner timed out or emitted diagnostics. The no-plugin variants were not evaluated. These binary results do not extend the historical source reachability assessment below to v8.0.16.
 
 ## Advisory matrix and reachability
 
-The following versions are recorded by both v8 binaries. Fixed versions are minimum advisory fixes, not a substitute for scanning the replacement artifact. Default here means the fresh OmaProxy-generated loopback HTTP configuration with a file auth store. It does not mean all existing installations, arbitrary backend configs, environment variables, or plugins have that configuration.
+The following versions are recorded by all reviewed v8 binaries. The source reachability assessment is based on v8.0.13; v8.0.16 received binary analysis only. Fixed versions are minimum advisory fixes, not a substitute for scanning the replacement artifact. Default here means the fresh OmaProxy-generated loopback HTTP configuration with a file auth store. It does not mean all existing installations, arbitrary backend configs, environment variables, or plugins have that configuration.
 
 | Advisory | Component found | Minimum fix | Assessment |
 | --- | --- | --- | --- |

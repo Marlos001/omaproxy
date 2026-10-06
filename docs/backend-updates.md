@@ -1,6 +1,6 @@
 # Backend updates
 
-Automatic installation and upgrades are currently withheld. The pinned v8.0.13 and the latest checked v8.0.15 official binaries still have vulnerability advisory matches. Checks remain available, and recovery/guarded rollback can restore a previously installed state. See the [security assessment and approval criteria](backend-security.md). Compatibility tests and checksums do not grant production rollout approval.
+Automatic installation and upgrades are currently withheld. The pinned v8.0.13 and the latest checked v8.0.16 official binaries still have vulnerability advisory matches. Checks remain available, and recovery/guarded rollback can restore a previously installed state. See the [security assessment and approval criteria](backend-security.md). Compatibility tests and checksums do not grant production rollout approval.
 
 GitHub's latest-release metadata is informational: downloading new metadata or adjacent checksums never changes the version or SHA-256 pins. The manifest is `VERSION` and `ARCHIVE_SHA256` in `scripts/omaproxy.py`; security approval additionally requires the exact version, architecture and digest in `backend_security.APPROVED_RELEASES`. That allowlist is empty. A future release requires a plugin change and review.
 
@@ -34,7 +34,7 @@ These commands return `{ "updates": { ... }, "message": "..." }`. `message` is o
 | `rollback_available` | Private backup receipt exists; the rollback operation checks its integrity |
 | `providers` | Allowlisted provider names, IDs, login flags and availability from executable help |
 | `restarted` | In update/rollback receipts, whether a previously running service was restarted |
-| `error` | Safe display message for a failed metadata check or unsupported installation |
+| `error` | Safe display message for a security hold, failed metadata check or unsupported installation |
 
 Fatal action errors use the bridge's existing `{ "error": "..." }` result and a nonzero exit code. Credentials, backend output and configuration contents are never returned. Checking updates does not restart, replace, or rewrite the backend. Help probes run only on explicit updater actions, in an empty working directory and clean environment. Status captures `X-CPA-VERSION` from its existing account request, avoiding a second management poll, and prefers it over the settings installation record.
 
