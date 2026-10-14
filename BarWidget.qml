@@ -18,6 +18,7 @@ Panel {
     property var quotaData: ({accounts: []})
     property var auth: ({})
     property var preferences: ({})
+    property var updates: ({})
     property var routingSettings: ({values: {}, capabilities: {}, strategies: []})
     property var diagnostics: ({})
     property var customProviders: []
@@ -91,7 +92,7 @@ Panel {
         action.running = true
     }
     function clearConnectionState() {
-        preferences = ({})
+        preferences = ({}); updates = ({})
         routingSettings = ({values: {}, capabilities: {}, strategies: []})
         diagnostics = ({}); customProviders = []; clientKeys = []
         providerWeightsSupported = false; showingDiagnostics = false
@@ -108,7 +109,10 @@ Panel {
         if (result.error) { noticeError = true; notice = result.error; return }
         if (result.connection_changed) {
             clearConnectionState()
-            snapshot = ({configured: false, running: false, accounts: [], models: [], providers: [], connection_id: result.connection_id})
+            snapshot = ({configured: false, running: false, accounts: [], models: [], providers: [],
+                connection_id: result.connection_id, mode: result.mode,
+                base_url: result.base_url || "", remote_base_url: result.remote_base_url || "",
+                has_api_key: result.has_api_key === true})
             quotaData = ({accounts: []})
             auth = ({})
             preferences = ({})
@@ -118,6 +122,8 @@ Panel {
             addingAccount = false
             addingKey = false
             editRemote = false
+            if (result.base_url !== undefined || result.remote_base_url !== undefined)
+                remoteUrl.text = result.base_url || result.remote_base_url || ""
         }
         if (result.auth !== undefined) {
             var wasWaiting = signingIn
@@ -130,6 +136,7 @@ Panel {
             }
         }
         if (result.preferences) preferences = result.preferences
+        if (result.updates) updates = result.updates
         if (result.routing_settings) routingSettings = result.routing_settings
         if (result.diagnostics) diagnostics = result.diagnostics
         if (result.custom_providers) customProviders = result.custom_providers
@@ -476,7 +483,7 @@ Panel {
                     spacing: Style.space(16)
 
                     Column {
-                        visible: !root.snapshot.configured && root.page !== 2
+                        visible: !root.snapshot.configured && root.page !== 2 && !root.remoteConnection
                         width: parent.width
                         spacing: Style.space(16)
                         Label { text: "Your accounts. Your remaining capacity."; font.bold: true; width: parent.width; wrapMode: Text.WordWrap }
@@ -780,7 +787,7 @@ Panel {
                                 }
                             }
                         }
-                        ActionButton { visible: !root.snapshot.configured && !root.editRemote; text: "Set up local proxy"; enabled: !root.busy; onClicked: root.perform(["setup"]) }
+                        ActionButton { visible: !root.snapshot.configured && !root.editRemote && !root.remoteConnection; text: "Set up local proxy"; enabled: !root.busy; onClicked: root.perform(["setup"]) }
                         PanelSeparator { foreground: root.foreground }
                         Label { text: "Display"; font.bold: true }
                         ActionButton {
@@ -959,6 +966,29 @@ Panel {
                             Hint { visible: !(root.snapshot.models || []).length; text: "No models reported by the enabled accounts." }
                         }
                         PanelSeparator { foreground: root.foreground }
+                        Column {
+                            visible: !root.remoteConnection
+                            width: parent.width
+                            spacing: Style.space(8)
+                        Label { text: "Backend updates"; font.bold: true }
+                        Hint { text: "Installed: " + (root.updates.installed_version || root.snapshot.version || "unknown") + " · Reviewed: " + (root.updates.reviewed_version || "check for updates") }
+                        Hint { visible: !!root.updates.latest_version; text: "Latest upstream: " + (root.updates.latest_version || "") }
+                        Hint { text: "Updating briefly restarts a running proxy. Your configuration and previous backend are kept for rollback." }
+                        ActionButton { visible: !root.remoteConnection; text: "Check backend updates"; enabled: !root.busy; onClicked: root.perform(["check-updates"]) }
+                        ActionButton {
+                            visible: !root.remoteConnection && root.updates.update_supported === true && root.updates.update_available === true
+                            text: "Install reviewed update"
+                            enabled: !root.busy
+                            onClicked: root.perform(["backend-update"])
+                        }
+                        ActionButton {
+                            visible: !root.remoteConnection && root.updates.rollback_available === true
+                            text: "Restore previous backend"
+                            enabled: !root.busy
+                            onClicked: root.perform(["backend-rollback"])
+                        }
+                        Hint { visible: !!root.updates.error; text: root.updates.error || "" }
+                        }
                         Hint { visible: !!root.snapshot.model_error; text: root.snapshot.model_error || "" }
                         Hint { visible: root.remoteConnection && !root.snapshot.has_api_key; text: "Add a client API key above to list models." }
                         Label { text: root.remoteConnection ? "CLIProxyAPI · Remote" : "CLIProxyAPI " + (root.snapshot.version || "custom"); opacity: 0.35; font.pixelSize: Style.font.caption }
